@@ -442,11 +442,15 @@ impl<T> NdArray<T> {
         let mut uninit = AlignedBuffer::<T>::new_uninit(self.len);
         let dst = uninit.as_mut_slice();
         match resolved_order {
-            Order::C => {
-                for (i, val) in self.iter().enumerate() {
-                    dst[i].write(val);
-                }
-            }
+            Order::C => unsafe {
+                copy_strided_to_c(
+                    self.storage.as_ptr().add(self.offset),
+                    &self.shape,
+                    &self.strides,
+                    self.len,
+                    dst,
+                );
+            },
             Order::F => {
                 let dst_strides = compute_f_strides(&self.shape);
                 let mut idx = vec![0usize; self.ndim()];
@@ -894,9 +898,16 @@ impl<T> NdArray<T> {
             for (slot, &x) in dst.iter_mut().zip(sl.iter()) {
                 slot.write(f(x));
             }
-        } else {
-            for (slot, x) in dst.iter_mut().zip(self.iter()) {
-                slot.write(f(x));
+        } else if self.len > 0 {
+            unsafe {
+                map_strided_to_c(
+                    self.storage.as_ptr().add(self.offset),
+                    &self.shape,
+                    &self.strides,
+                    self.len,
+                    dst,
+                    &mut f,
+                );
             }
         }
         let buf = unsafe { uninit.assume_init() };
@@ -1067,8 +1078,14 @@ impl<'a, T> ArrayView<'a, T> {
             .unwrap();
         }
         let mut uninit = AlignedBuffer::<T>::new_uninit(self.len);
-        for (slot, val) in uninit.as_mut_slice().iter_mut().zip(self.iter()) {
-            slot.write(val);
+        unsafe {
+            copy_strided_to_c(
+                self.ptr.as_ptr(),
+                &self.shape,
+                &self.strides,
+                self.len,
+                uninit.as_mut_slice(),
+            );
         }
         let buf = unsafe { uninit.assume_init() };
         NdArray::from_aligned_buffer(buf, &self.shape, Order::C).unwrap()
@@ -1427,5 +1444,253 @@ impl<T: Copy + fmt::Display + fmt::Debug> fmt::Display for NdArray<T> {
         }
         let vals = self.to_vec();
         write!(f, "array({vals:?}, shape={:?})", self.shape)
+    }
+}
+
+/// Zero-allocation strided-to-C-contiguous copy with specialized 1D, row-memcpy,
+/// and cache-blocked 2D transpose paths.
+unsafe fn copy_strided_to_c<T: Copy>(
+    src_ptr: *const T,
+    shape: &[usize],
+    strides: &[isize],
+    len: usize,
+    dst: &mut [std::mem::MaybeUninit<T>],
+) {
+    use std::mem::{size_of, MaybeUninit};
+    use std::ptr;
+
+    if len == 0 {
+        return;
+    }
+    let mut sq_shape = [0usize; 32];
+    let mut sq_strides = [0isize; 32];
+    let mut ndim = 0usize;
+
+    if shape.len() <= 32 {
+        for (&d, &st) in shape.iter().zip(strides.iter()) {
+            if d != 1 {
+                sq_shape[ndim] = d;
+                sq_strides[ndim] = st;
+                ndim += 1;
+            }
+        }
+    } else {
+        // Rare >32-D fallback via stackless cursor
+        let mut idx = vec![0usize; shape.len()];
+        let mut p = src_ptr;
+        for slot in dst.iter_mut() {
+            slot.write(unsafe { *p });
+            for ax in (0..shape.len()).rev() {
+                idx[ax] += 1;
+                if idx[ax] < shape[ax] {
+                    p = unsafe { p.offset(strides[ax]) };
+                    break;
+                }
+                let back = (idx[ax] - 1) as isize * strides[ax];
+                p = unsafe { p.offset(-back) };
+                idx[ax] = 0;
+            }
+        }
+        return;
+    }
+
+    match ndim {
+        0 => {
+            let val = unsafe { *src_ptr };
+            for slot in dst.iter_mut() {
+                slot.write(val);
+            }
+        }
+        1 => {
+            let st = sq_strides[0];
+            if st == 1 {
+                unsafe {
+                    ptr::copy_nonoverlapping(src_ptr, dst.as_mut_ptr() as *mut T, len);
+                }
+            } else if st == 0 {
+                let val = unsafe { *src_ptr };
+                for slot in dst.iter_mut() {
+                    slot.write(val);
+                }
+            } else {
+                for (i, slot) in dst.iter_mut().enumerate() {
+                    slot.write(unsafe { *src_ptr.offset((i as isize) * st) });
+                }
+            }
+        }
+        2 => {
+            let (rows, cols) = (sq_shape[0], sq_shape[1]);
+            let (s0, s1) = (sq_strides[0], sq_strides[1]);
+            if s1 == 1 {
+                for r in 0..rows {
+                    unsafe {
+                        let src_row = src_ptr.offset((r as isize) * s0);
+                        let dst_row = dst.as_mut_ptr().add(r * cols) as *mut T;
+                        ptr::copy_nonoverlapping(src_row, dst_row, cols);
+                    }
+                }
+            } else if s0 == 1 && size_of::<T>() <= 16 {
+                const BLOCK: usize = 32;
+                let mut tile = [[MaybeUninit::<T>::uninit(); BLOCK]; BLOCK];
+                for r0 in (0..rows).step_by(BLOCK) {
+                    let r_len = (rows - r0).min(BLOCK);
+                    for c0 in (0..cols).step_by(BLOCK) {
+                        let c_len = (cols - c0).min(BLOCK);
+                        for dc in 0..c_len {
+                            let col_ptr = unsafe { src_ptr.offset(((c0 + dc) as isize) * s1 + r0 as isize) };
+                            for dr in 0..r_len {
+                                tile[dr][dc].write(unsafe { *col_ptr.add(dr) });
+                            }
+                        }
+                        for dr in 0..r_len {
+                            unsafe {
+                                let dst_row = dst.as_mut_ptr().add((r0 + dr) * cols + c0) as *mut T;
+                                ptr::copy_nonoverlapping(tile[dr].as_ptr() as *const T, dst_row, c_len);
+                            }
+                        }
+                    }
+                }
+            } else {
+                for r in 0..rows {
+                    let row_ptr = unsafe { src_ptr.offset((r as isize) * s0) };
+                    let dst_off = r * cols;
+                    for c in 0..cols {
+                        dst[dst_off + c].write(unsafe { *row_ptr.offset((c as isize) * s1) });
+                    }
+                }
+            }
+        }
+        _ => {
+            let mut coords = [0usize; 32];
+            if sq_strides[ndim - 1] == 1 {
+                let inner_len = sq_shape[ndim - 1];
+                let outer_count = len / inner_len;
+                let mut p = src_ptr;
+                let mut dst_off = 0usize;
+                for outer in 0..outer_count {
+                    unsafe {
+                        ptr::copy_nonoverlapping(p, dst.as_mut_ptr().add(dst_off) as *mut T, inner_len);
+                    }
+                    dst_off += inner_len;
+                    if outer + 1 < outer_count {
+                        for ax in (0..ndim - 1).rev() {
+                            coords[ax] += 1;
+                            if coords[ax] < sq_shape[ax] {
+                                p = unsafe { p.offset(sq_strides[ax]) };
+                                break;
+                            }
+                            let back = (coords[ax] - 1) as isize * sq_strides[ax];
+                            p = unsafe { p.offset(-back) };
+                            coords[ax] = 0;
+                        }
+                    }
+                }
+            } else {
+                let mut p = src_ptr;
+                for i in 0..len {
+                    dst[i].write(unsafe { *p });
+                    if i + 1 < len {
+                        for ax in (0..ndim).rev() {
+                            coords[ax] += 1;
+                            if coords[ax] < sq_shape[ax] {
+                                p = unsafe { p.offset(sq_strides[ax]) };
+                                break;
+                            }
+                            let back = (coords[ax] - 1) as isize * sq_strides[ax];
+                            p = unsafe { p.offset(-back) };
+                            coords[ax] = 0;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Zero-allocation strided element-wise mapper.
+unsafe fn map_strided_to_c<T: Copy, U, F: FnMut(T) -> U>(
+    src_ptr: *const T,
+    shape: &[usize],
+    strides: &[isize],
+    len: usize,
+    dst: &mut [std::mem::MaybeUninit<U>],
+    f: &mut F,
+) {
+    if len == 0 {
+        return;
+    }
+    let mut sq_shape = [0usize; 32];
+    let mut sq_strides = [0isize; 32];
+    let mut ndim = 0usize;
+    if shape.len() <= 32 {
+        for (&d, &st) in shape.iter().zip(strides.iter()) {
+            if d != 1 {
+                sq_shape[ndim] = d;
+                sq_strides[ndim] = st;
+                ndim += 1;
+            }
+        }
+    } else {
+        let mut idx = vec![0usize; shape.len()];
+        let mut p = src_ptr;
+        for slot in dst.iter_mut() {
+            slot.write(f(unsafe { *p }));
+            for ax in (0..shape.len()).rev() {
+                idx[ax] += 1;
+                if idx[ax] < shape[ax] {
+                    p = unsafe { p.offset(strides[ax]) };
+                    break;
+                }
+                let back = (idx[ax] - 1) as isize * strides[ax];
+                p = unsafe { p.offset(-back) };
+                idx[ax] = 0;
+            }
+        }
+        return;
+    }
+
+    match ndim {
+        0 => {
+            let v = unsafe { *src_ptr };
+            for slot in dst.iter_mut() {
+                slot.write(f(v));
+            }
+        }
+        1 => {
+            let st = sq_strides[0];
+            for (i, slot) in dst.iter_mut().enumerate() {
+                slot.write(f(unsafe { *src_ptr.offset((i as isize) * st) }));
+            }
+        }
+        2 => {
+            let (rows, cols) = (sq_shape[0], sq_shape[1]);
+            let (s0, s1) = (sq_strides[0], sq_strides[1]);
+            for r in 0..rows {
+                let row_ptr = unsafe { src_ptr.offset((r as isize) * s0) };
+                let dst_off = r * cols;
+                for c in 0..cols {
+                    dst[dst_off + c].write(f(unsafe { *row_ptr.offset((c as isize) * s1) }));
+                }
+            }
+        }
+        _ => {
+            let mut coords = [0usize; 32];
+            let mut p = src_ptr;
+            for i in 0..len {
+                dst[i].write(f(unsafe { *p }));
+                if i + 1 < len {
+                    for ax in (0..ndim).rev() {
+                        coords[ax] += 1;
+                        if coords[ax] < sq_shape[ax] {
+                            p = unsafe { p.offset(sq_strides[ax]) };
+                            break;
+                        }
+                        let back = (coords[ax] - 1) as isize * sq_strides[ax];
+                        p = unsafe { p.offset(-back) };
+                        coords[ax] = 0;
+                    }
+                }
+            }
+        }
     }
 }

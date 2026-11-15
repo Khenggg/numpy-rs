@@ -4,15 +4,54 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+bench-core = ["dep:numpy-core"]
+bench-ufunc = ["dep:numpy-ufunc"]
+bench-linalg = ["dep:numpy-linalg"]
+bench-fft = ["dep:numpy-fft"]
+bench-random = ["dep:numpy-random"]
+bench-all = ["bench-core", "bench-ufunc", "bench-linalg", "bench-fft", "bench-random", "dep:numpy-rs", "dep:numpy-lib"]
+
 [dependencies]
-numpy-rs.workspace = true
 numpy-types.workspace = true
-numpy-core.workspace = true
-numpy-ufunc.workspace = true
-numpy-linalg.workspace = true
-numpy-fft.workspace = true
-numpy-random.workspace = true
-numpy-lib.workspace = true
 criterion.workspace = true
 num-complex.workspace = true
 rayon.workspace = true
+
+numpy-rs = { workspace = true, optional = true }
+numpy-core = { workspace = true, optional = true }
+numpy-ufunc = { workspace = true, optional = true }
+numpy-linalg = { workspace = true, optional = true }
+numpy-fft = { workspace = true, optional = true }
+numpy-random = { workspace = true, optional = true }
+numpy-lib = { workspace = true, optional = true }
+
+[[bench]]
+name = "types_bench"
+harness = false
+
+[[bench]]
+name = "core_bench"
+harness = false
+required-features = ["bench-core"]
+
+[[bench]]
+name = "ufunc_bench"
+harness = false
+required-features = ["bench-ufunc"]
+
+[[bench]]
+name = "linalg_bench"
+harness = false
+required-features = ["bench-linalg"]
+
+[[bench]]
+name = "fft_bench"
+harness = false
+required-features = ["bench-fft"]
+
+[[bench]]
+name = "random_bench"
+harness = false
+required-features = ["bench-random"]

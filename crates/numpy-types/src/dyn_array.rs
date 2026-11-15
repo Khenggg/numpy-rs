@@ -259,7 +259,7 @@ impl DynArray {
             return Ok(self.clone());
         }
         Ok(match to {
-            DType::Bool => Self::Bool(cast_to_typed(self, |x| x.is_truthy())),
+            DType::Bool => Self::Bool(cast_to_bool(self)),
             DType::I8 => Self::I8(cast_to_i64(self).map(|v| v as i8)),
             DType::I16 => Self::I16(cast_to_i64(self).map(|v| v as i16)),
             DType::I32 => Self::I32(cast_to_i64(self).map(|v| v as i32)),
@@ -311,6 +311,25 @@ impl DynArray {
         let a_b = a.astype(target, Casting::Unsafe)?.broadcast_to(&out_shape)?;
         let b_b = b.astype(target, Casting::Unsafe)?.broadcast_to(&out_shape)?;
         Ok((a_b, b_b))
+    }
+}
+
+fn cast_to_bool(src: &DynArray) -> NdArray<bool> {
+    match src {
+        DynArray::Bool(a) => a.clone(),
+        DynArray::I8(a) => a.map(|x| x.is_truthy()),
+        DynArray::I16(a) => a.map(|x| x.is_truthy()),
+        DynArray::I32(a) => a.map(|x| x.is_truthy()),
+        DynArray::I64(a) => a.map(|x| x.is_truthy()),
+        DynArray::U8(a) => a.map(|x| x.is_truthy()),
+        DynArray::U16(a) => a.map(|x| x.is_truthy()),
+        DynArray::U32(a) => a.map(|x| x.is_truthy()),
+        DynArray::U64(a) => a.map(|x| x.is_truthy()),
+        DynArray::F16(a) => a.map(|x| x.is_truthy()),
+        DynArray::F32(a) => a.map(|x| x.is_truthy()),
+        DynArray::F64(a) => a.map(|x| x.is_truthy()),
+        DynArray::C64(a) => a.map(|x| x.is_truthy()),
+        DynArray::C128(a) => a.map(|x| x.is_truthy()),
     }
 }
 

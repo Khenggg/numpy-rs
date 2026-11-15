@@ -363,11 +363,28 @@ pub fn result_type(dtypes: &[DType]) -> Result<DType> {
     if dtypes.is_empty() {
         return Err(NumPyError::InvalidValue("at least one dtype is required for result_type".into()));
     }
-    let mut acc = dtypes[0];
-    for &dt in &dtypes[1..] {
-        acc = promote_types(acc, dt);
+    const CANDIDATES: [DType; 14] = [
+        DType::Bool,
+        DType::U8,
+        DType::I8,
+        DType::U16,
+        DType::I16,
+        DType::U32,
+        DType::I32,
+        DType::U64,
+        DType::I64,
+        DType::F16,
+        DType::F32,
+        DType::F64,
+        DType::C64,
+        DType::C128,
+    ];
+    for cand in CANDIDATES {
+        if dtypes.iter().all(|&dt| can_cast(dt, cand, Casting::Safe)) {
+            return Ok(cand);
+        }
     }
-    Ok(acc)
+    Ok(DType::C128)
 }
 
 /// Equivalent to `numpy.can_cast(from, to, casting=...)`.
@@ -382,7 +399,8 @@ pub const fn can_cast(from: DType, to: DType, casting: Casting) -> bool {
             }
             match (from.kind(), to.kind()) {
                 (DTypeKind::Bool, _) => true,
-                (DTypeKind::SignedInt | DTypeKind::UnsignedInt, DTypeKind::SignedInt | DTypeKind::UnsignedInt) => true,
+                (DTypeKind::SignedInt, DTypeKind::SignedInt) => true,
+                (DTypeKind::UnsignedInt, DTypeKind::SignedInt | DTypeKind::UnsignedInt) => true,
                 (DTypeKind::SignedInt | DTypeKind::UnsignedInt, DTypeKind::Float | DTypeKind::Complex) => true,
                 (DTypeKind::Float, DTypeKind::Float | DTypeKind::Complex) => true,
                 (DTypeKind::Complex, DTypeKind::Complex) => true,
@@ -448,7 +466,7 @@ unsafe impl Scalar for f16 {
     const DTYPE: DType = DType::F16;
     #[inline] fn zero() -> Self { f16::ZERO }
     #[inline] fn one() -> Self { f16::ONE }
-    #[inline] fn is_truthy(self) -> bool { self != f16::ZERO && !self.is_nan() }
+    #[inline] fn is_truthy(self) -> bool { self != f16::ZERO }
     #[inline] fn to_f64_lossy(self) -> f64 { self.to_f64() }
     #[inline] fn from_f64_lossy(v: f64) -> Self { f16::from_f64(v) }
     #[inline] fn to_complex64(self) -> Complex64 { Complex64::new(self.to_f64(), 0.0) }
