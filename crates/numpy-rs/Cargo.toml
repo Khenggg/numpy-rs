@@ -1,0 +1,19 @@
+[package]
+name = "numpy-rs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+numpy-types.workspace = true
+numpy-core.workspace = true
+numpy-ufunc.workspace = true
+numpy-linalg.workspace = true
+numpy-fft.workspace = true
+numpy-random.workspace = true
+numpy-lib.workspace = true
+numpy-extra.workspace = true
+half.workspace = true
+num-complex.workspace = true
+num-traits.workspace = true
+rayon.workspace = true

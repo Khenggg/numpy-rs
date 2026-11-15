@@ -1,0 +1,54 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/numpy-types",
+    "crates/numpy-core",
+    "crates/numpy-ufunc",
+    "crates/numpy-linalg",
+    "crates/numpy-fft",
+    "crates/numpy-random",
+    "crates/numpy-lib",
+    "crates/numpy-extra",
+    "crates/numpy-rs",
+    "crates/numpy-bench",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+authors = ["numpy-rs contributors"]
+
+[workspace.dependencies]
+numpy-types = { path = "crates/numpy-types" }
+numpy-core = { path = "crates/numpy-core" }
+numpy-ufunc = { path = "crates/numpy-ufunc" }
+numpy-linalg = { path = "crates/numpy-linalg" }
+numpy-fft = { path = "crates/numpy-fft" }
+numpy-random = { path = "crates/numpy-random" }
+numpy-lib = { path = "crates/numpy-lib" }
+numpy-extra = { path = "crates/numpy-extra" }
+numpy-rs = { path = "crates/numpy-rs" }
+
+half = { version = "2", features = ["num-traits"] }
+num-complex = "0.4"
+num-traits = "0.2"
+rayon = "1.10"
+matrixmultiply = "0.3"
+faer = "0.21"
+rustfft = "6.2"
+realfft = "3.4"
+memmap2 = "0.9"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+byteorder = "1.5"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+[profile.bench]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

@@ -1,0 +1,18 @@
+[package]
+name = "numpy-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+numpy-rs.workspace = true
+numpy-types.workspace = true
+numpy-core.workspace = true
+numpy-ufunc.workspace = true
+numpy-linalg.workspace = true
+numpy-fft.workspace = true
+numpy-random.workspace = true
+numpy-lib.workspace = true
+criterion.workspace = true
+num-complex.workspace = true
+rayon.workspace = true
