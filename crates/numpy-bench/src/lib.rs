@@ -138,6 +138,24 @@ pub fn gen_spd_f64(n: usize, seed: u64) -> NdArray<f64> {
     NdArray::from_aligned_buffer(buf, &[n, n], Order::C).unwrap()
 }
 
+/// Generate a well-conditioned non-symmetric `[n, n]` `NdArray<f64>` with eigenvalues near `1.0`
+/// so `det` / `inv` do not overflow or underflow `f64`.
+pub fn gen_well_cond_f64(n: usize, seed: u64) -> NdArray<f64> {
+    let mut uninit = AlignedBuffer::<f64>::new_uninit(n * n);
+    let slice = uninit.as_mut_slice();
+    let mut state = seed;
+    let scale = 1.0 / (4.0 * (n as f64).sqrt());
+    for i in 0..n {
+        for j in 0..n {
+            state = splitmix64(state);
+            let v = (2.0 * u64_to_unit_f64(state) - 1.0) * scale;
+            slice[i * n + j].write(if i == j { 1.0 + v } else { v });
+        }
+    }
+    let buf = unsafe { uninit.assume_init() };
+    NdArray::from_aligned_buffer(buf, &[n, n], Order::C).unwrap()
+}
+
 /// Diagnostic snapshot of an `NdArray<T>`'s memory alignment, offset, contiguity, and stride layout.
 #[derive(Debug, Clone)]
 pub struct LayoutReport {

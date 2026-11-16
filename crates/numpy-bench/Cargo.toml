@@ -5,19 +5,20 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = []
+default = ["bench-fft", "bench-random"]
 bench-core = ["dep:numpy-core"]
 bench-ufunc = ["dep:numpy-ufunc"]
 bench-linalg = ["dep:numpy-linalg"]
 bench-fft = ["dep:numpy-fft"]
 bench-random = ["dep:numpy-random"]
-bench-all = ["bench-core", "bench-ufunc", "bench-linalg", "bench-fft", "bench-random", "dep:numpy-rs", "dep:numpy-lib"]
+bench-all = ["bench-core", "bench-ufunc", "bench-linalg", "bench-fft", "bench-random", "dep:numpy-rs", "dep:numpy-lib", "dep:numpy-extra"]
 
 [dependencies]
 numpy-types.workspace = true
 criterion.workspace = true
 num-complex.workspace = true
 rayon.workspace = true
+serde_json = "1"
 
 numpy-rs = { workspace = true, optional = true }
 numpy-core = { workspace = true, optional = true }
@@ -26,6 +27,12 @@ numpy-linalg = { workspace = true, optional = true }
 numpy-fft = { workspace = true, optional = true }
 numpy-random = { workspace = true, optional = true }
 numpy-lib = { workspace = true, optional = true }
+numpy-extra = { workspace = true, optional = true }
+
+[[example]]
+name = "performance_matrix"
+path = "performance_matrix/rust/main.rs"
+required-features = ["bench-all"]
 
 [[bench]]
 name = "types_bench"

@@ -109,7 +109,7 @@ impl DynArray {
 
     #[inline]
     pub fn nbytes(&self) -> usize {
-        self.len() * self.itemsize()
+        self.len().saturating_mul(self.itemsize())
     }
 
     /// Create a zero-filled `DynArray` of `dtype`.

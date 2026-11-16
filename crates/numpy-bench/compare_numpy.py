@@ -317,6 +317,7 @@ def suite_linalg() -> List[Tuple[str, Optional[int], Optional[int], Callable[[],
     spd128 = make_spd(128)
     spd256 = make_spd(256)
     spd512 = make_spd(512)
+    det_256 = rng.uniform(-1.0, 1.0, size=(256, 256)) / (4.0 * np.sqrt(256.0)) + np.eye(256)
     rhs64 = rng.uniform(-1.0, 1.0, size=(64, 1))
     rhs256 = rng.uniform(-1.0, 1.0, size=(256, 1))
     rhs512 = rng.uniform(-1.0, 1.0, size=(512, 1))
@@ -340,8 +341,8 @@ def suite_linalg() -> List[Tuple[str, Optional[int], Optional[int], Callable[[],
         ("linalg_solve/solve_f64_64x64", None, None, lambda: np.linalg.solve(spd64, rhs64)),
         ("linalg_solve/solve_f64_256x256", None, None, lambda: np.linalg.solve(spd256, rhs256)),
         ("linalg_solve/solve_f64_512x512", None, None, lambda: np.linalg.solve(spd512, rhs512)),
-        ("linalg_solve/inv_f64_256x256", None, None, lambda: np.linalg.inv(spd256)),
-        ("linalg_solve/det_f64_256x256", None, None, lambda: np.linalg.det(spd256)),
+        ("linalg_solve/inv_f64_256x256", None, None, lambda: np.linalg.inv(det_256)),
+        ("linalg_solve/det_f64_256x256", None, None, lambda: np.linalg.det(det_256)),
         ("linalg_solve/cholesky_f64_256x256", None, None, lambda: np.linalg.cholesky(spd256)),
         ("linalg_solve/cholesky_f64_512x512", None, None, lambda: np.linalg.cholesky(spd512)),
         ("linalg_decomp/qr_f64_128x128", None, None, lambda: np.linalg.qr(a128)),

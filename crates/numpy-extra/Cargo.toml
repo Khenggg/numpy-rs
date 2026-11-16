@@ -8,6 +8,7 @@ license.workspace = true
 numpy-types.workspace = true
 numpy-core.workspace = true
 numpy-ufunc.workspace = true
+numpy-lib.workspace = true
 half.workspace = true
 num-complex.workspace = true
 num-traits.workspace = true

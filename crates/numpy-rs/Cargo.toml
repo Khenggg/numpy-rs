@@ -4,16 +4,58 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["fft", "random"]
+core = ["dep:numpy-core"]
+ufunc = ["dep:numpy-ufunc"]
+linalg = ["dep:numpy-linalg"]
+fft = ["dep:numpy-fft"]
+random = ["dep:numpy-random"]
+lib = ["dep:numpy-lib"]
+extra = ["dep:numpy-extra"]
+full = ["core", "ufunc", "linalg", "fft", "random", "lib", "extra"]
+
 [dependencies]
 numpy-types.workspace = true
-numpy-core.workspace = true
-numpy-ufunc.workspace = true
-numpy-linalg.workspace = true
-numpy-fft.workspace = true
-numpy-random.workspace = true
-numpy-lib.workspace = true
-numpy-extra.workspace = true
+numpy-core = { workspace = true, optional = true }
+numpy-ufunc = { workspace = true, optional = true }
+numpy-linalg = { workspace = true, optional = true }
+numpy-fft = { workspace = true, optional = true }
+numpy-random = { workspace = true, optional = true }
+numpy-lib = { workspace = true, optional = true }
+numpy-extra = { workspace = true, optional = true }
 half.workspace = true
 num-complex.workspace = true
 num-traits.workspace = true
 rayon.workspace = true
+
+[[test]]
+name = "types_oracle"
+
+[[test]]
+name = "fft_oracle"
+required-features = ["fft"]
+
+[[test]]
+name = "random_oracle"
+required-features = ["random"]
+
+[[test]]
+name = "lib_oracle"
+required-features = ["lib"]
+
+[[test]]
+name = "extra_oracle"
+required-features = ["extra"]
+
+[[test]]
+name = "core_oracle"
+required-features = ["core"]
+
+[[test]]
+name = "ufunc_oracle"
+required-features = ["ufunc"]
+
+[[test]]
+name = "linalg_oracle"
+required-features = ["linalg"]

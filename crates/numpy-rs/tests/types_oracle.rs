@@ -669,3 +669,141 @@ emit_arr("pb", pb)
     assert_eq!(fa.dtype(), DType::F64);
     assert_eq!(fb.dtype(), DType::F64);
 }
+
+#[test]
+fn test_strided_copy_and_map_paths_against_numpy_oracle() {
+    let oracle = run_oracle(
+        r#"
+# 2D 37x71 non-multiple-of-32 blocked transpose & flipped transpose
+m = np.arange(71 * 37, dtype=np.float64).reshape(71, 37)
+emit_arr("t_37_71", np.ascontiguousarray(m.T))
+emit_arr("t_37_71_flip", np.ascontiguousarray(m[::-1, :].T))
+emit_arr("t_map", (m.T * 2.0 + 1.0))
+
+# 2D general strided (step 2 on both axes)
+emit_arr("sub_2d", np.ascontiguousarray(m[::3, ::2]))
+
+# 3D inner-contiguous & general negative strides
+a3 = np.arange(3 * 4 * 5, dtype=np.int32).reshape(3, 4, 5)
+emit_arr("v3_inner1", np.ascontiguousarray(a3[::-1, ::2, 1:4]))
+emit_arr("v3_gen", np.ascontiguousarray(a3.transpose(2, 0, 1)[::-1, :, ::-2]))
+emit_arr("v3_map", (a3.transpose(2, 0, 1)[::-1, :, ::-2] + 10))
+"#,
+    );
+
+    // 0D / all size-1 squeezed view
+    let sc = NdArray::from_scalar(7.5f64);
+    let b0 = sc.broadcast_to(&[1, 1, 1]).unwrap();
+    assert_eq!(b0.to_c_contiguous().to_vec(), vec![7.5]);
+    assert_eq!(b0.map(|x| x * 2.0).to_vec(), vec![15.0]);
+
+    // 1D stride=0 broadcast
+    let one = NdArray::from_vec(vec![3.25f64]);
+    let b1 = one.broadcast_to(&[17]).unwrap();
+    assert_eq!(b1.to_c_contiguous().to_vec(), vec![3.25; 17]);
+    assert_eq!(b1.map(|x| x + 1.0).to_vec(), vec![4.25; 17]);
+
+    // 2D 71x37 -> transpose 37x71 (hits BLOCK=32 tile boundary 32+5, 64+7)
+    let m_data: Vec<f64> = (0..(71 * 37)).map(|i| i as f64).collect();
+    let m = NdArray::from_shape_vec(&[71, 37], m_data).unwrap();
+    let mt = m.t();
+    let mt_c = mt.to_c_contiguous();
+    assert!(mt_c.is_c_contiguous());
+    assert_dyn_matches_oracle(&DynArray::F64(mt_c), oracle.arr("t_37_71"), 0.0, 0.0, false, false, "t_37_71");
+
+    // 2D flipped then transposed -> s0 == 1 with negative s1!
+    let m_flip_t = m.flip(Some(&[0])).unwrap().t();
+    assert_eq!(m_flip_t.strides()[0], 1);
+    assert!(m_flip_t.strides()[1] < 0);
+    assert_dyn_matches_oracle(
+        &DynArray::F64(m_flip_t.to_c_contiguous()),
+        oracle.arr("t_37_71_flip"),
+        0.0,
+        0.0,
+        false,
+        false,
+        "t_37_71_flip",
+    );
+    assert_dyn_matches_oracle(
+        &DynArray::F64(mt.map(|x| x * 2.0 + 1.0)),
+        oracle.arr("t_map"),
+        0.0,
+        0.0,
+        false,
+        false,
+        "t_map",
+    );
+
+    // 2D broadcast column (s0=1, s1=0)
+    let col = NdArray::from_shape_vec(&[40, 1], (0..40).map(|i| i as f64).collect()).unwrap();
+    let col_b = col.broadcast_to(&[40, 35]).unwrap();
+    let col_c = col_b.to_c_contiguous();
+    assert_eq!(col_c.shape(), &[40, 35]);
+    assert_eq!(col_c.get(&[39, 34]).unwrap(), 39.0);
+
+    // 2D general strided
+    let sub_2d = m
+        .slice(&[
+            SliceArg::Slice(Slice::full().step_by(3)),
+            SliceArg::Slice(Slice::full().step_by(2)),
+        ])
+        .unwrap()
+        .to_c_contiguous();
+    assert_dyn_matches_oracle(&DynArray::F64(sub_2d), oracle.arr("sub_2d"), 0.0, 0.0, false, false, "sub_2d");
+
+    // 3D inner-contiguous & general negative strides
+    let a3 = NdArray::from_shape_vec(&[3, 4, 5], (0..60i32).collect()).unwrap();
+    let v3_inner1 = a3
+        .slice(&[
+            SliceArg::Slice(Slice::full().step_by(-1)),
+            SliceArg::Slice(Slice::full().step_by(2)),
+            SliceArg::from(1..4),
+        ])
+        .unwrap();
+    assert_dyn_matches_oracle(
+        &DynArray::I32(v3_inner1.to_c_contiguous()),
+        oracle.arr("v3_inner1"),
+        0.0,
+        0.0,
+        false,
+        false,
+        "v3_inner1",
+    );
+
+    let v3_gen = a3
+        .transpose(Some(&[2, 0, 1]))
+        .unwrap()
+        .slice(&[
+            SliceArg::Slice(Slice::full().step_by(-1)),
+            SliceArg::from(..),
+            SliceArg::Slice(Slice::full().step_by(-2)),
+        ])
+        .unwrap();
+    assert_dyn_matches_oracle(
+        &DynArray::I32(v3_gen.to_c_contiguous()),
+        oracle.arr("v3_gen"),
+        0.0,
+        0.0,
+        false,
+        false,
+        "v3_gen",
+    );
+    assert_dyn_matches_oracle(
+        &DynArray::I32(v3_gen.map(|x| x + 10)),
+        oracle.arr("v3_map"),
+        0.0,
+        0.0,
+        false,
+        false,
+        "v3_map",
+    );
+
+    // >32-D fallback (33D)
+    let mut shape33 = vec![1usize; 33];
+    shape33[0] = 2;
+    shape33[32] = 3;
+    let a33 = NdArray::from_shape_vec(&shape33, vec![10, 20, 30, 40, 50, 60]).unwrap();
+    let a33_flip = a33.flip(Some(&[0, 32])).unwrap();
+    assert_eq!(a33_flip.to_c_contiguous().to_vec(), vec![60, 50, 40, 30, 20, 10]);
+    assert_eq!(a33_flip.map(|x| x + 1).to_vec(), vec![61, 51, 41, 31, 21, 11]);
+}

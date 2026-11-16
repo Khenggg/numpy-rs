@@ -48,47 +48,49 @@ impl Slice {
         if dim_len == 0 {
             return Ok((0, 0, self.step));
         }
-        let n = dim_len as isize;
+        let n = isize::try_from(dim_len)
+            .map_err(|_| NumPyError::ShapeMismatch(format!("dimension {dim_len} exceeds isize::MAX")))?;
         if self.step > 0 {
             let start = match self.start {
                 None => 0,
                 Some(s) => {
-                    let s = if s < 0 { s + n } else { s };
+                    let s = if s < 0 { s.saturating_add(n) } else { s };
                     s.clamp(0, n)
                 }
             };
             let stop = match self.stop {
                 None => n,
                 Some(s) => {
-                    let s = if s < 0 { s + n } else { s };
+                    let s = if s < 0 { s.saturating_add(n) } else { s };
                     s.clamp(0, n)
                 }
             };
             if start >= stop {
                 Ok((0, 0, self.step))
             } else {
-                let count = ((stop - start - 1) / self.step + 1) as usize;
+                let count = ((stop as i128 - start as i128 - 1) / (self.step as i128) + 1) as usize;
                 Ok((start as usize, count, self.step))
             }
         } else {
             let start = match self.start {
                 None => n - 1,
                 Some(s) => {
-                    let s = if s < 0 { s + n } else { s };
+                    let s = if s < 0 { s.saturating_add(n) } else { s };
                     s.clamp(-1, n - 1)
                 }
             };
             let stop = match self.stop {
                 None => -1,
                 Some(s) => {
-                    let s = if s < 0 { s + n } else { s };
+                    let s = if s < 0 { s.saturating_add(n) } else { s };
                     s.clamp(-1, n - 1)
                 }
             };
             if start <= stop {
                 Ok((0, 0, self.step))
             } else {
-                let count = ((start - stop - 1) / (-self.step) + 1) as usize;
+                let dist = (start as i128 - stop as i128 - 1) as u128;
+                let count = (dist / (self.step.unsigned_abs() as u128) + 1) as usize;
                 Ok((start as usize, count, self.step))
             }
         }
@@ -163,16 +165,26 @@ impl From<RangeFull> for SliceArg {
 impl From<RangeInclusive<isize>> for SliceArg {
     #[inline]
     fn from(r: RangeInclusive<isize>) -> Self {
-        let stop = (*r.end()).saturating_add(1);
-        Self::Slice(Slice::new(Some(*r.start()), Some(stop), 1))
+        let end = *r.end();
+        let stop = if end == -1 || end == isize::MAX {
+            None
+        } else {
+            Some(end + 1)
+        };
+        Self::Slice(Slice::new(Some(*r.start()), stop, 1))
     }
 }
 
 impl From<RangeToInclusive<isize>> for SliceArg {
     #[inline]
     fn from(r: RangeToInclusive<isize>) -> Self {
-        let stop = r.end.saturating_add(1);
-        Self::Slice(Slice::new(None, Some(stop), 1))
+        let end = r.end;
+        let stop = if end == -1 || end == isize::MAX {
+            None
+        } else {
+            Some(end + 1)
+        };
+        Self::Slice(Slice::new(None, stop, 1))
     }
 }
 
@@ -206,7 +218,17 @@ macro_rules! slice_arg {
 #[inline]
 pub fn shape_size(shape: &[usize]) -> Result<usize> {
     let mut total = 1usize;
+    let mut nonzero_prod = 1usize;
     for &dim in shape {
+        if dim > isize::MAX as usize {
+            return Err(NumPyError::ShapeMismatch(format!(
+                "shape dimension {dim} exceeds isize::MAX"
+            )));
+        }
+        nonzero_prod = nonzero_prod
+            .checked_mul(dim.max(1))
+            .filter(|&p| p <= isize::MAX as usize)
+            .ok_or_else(|| NumPyError::ShapeMismatch(format!("shape {shape:?} overflows isize")))?;
         total = total
             .checked_mul(dim)
             .ok_or_else(|| NumPyError::ShapeMismatch(format!("shape {shape:?} overflows usize")))?;
@@ -394,7 +416,13 @@ pub fn is_c_contiguous(shape: &[usize], strides: &[isize]) -> bool {
             if st != expected {
                 return false;
             }
-            expected *= dim as isize;
+            let Ok(dim_i) = isize::try_from(dim) else {
+                return false;
+            };
+            let Some(next) = expected.checked_mul(dim_i) else {
+                return false;
+            };
+            expected = next;
         }
     }
     true
@@ -411,7 +439,13 @@ pub fn is_f_contiguous(shape: &[usize], strides: &[isize]) -> bool {
             if st != expected {
                 return false;
             }
-            expected *= dim as isize;
+            let Ok(dim_i) = isize::try_from(dim) else {
+                return false;
+            };
+            let Some(next) = expected.checked_mul(dim_i) else {
+                return false;
+            };
+            expected = next;
         }
     }
     true

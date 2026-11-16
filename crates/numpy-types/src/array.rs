@@ -85,11 +85,15 @@ impl<T> NdArray<T> {
         }
         let len = shape_size(&shape)?;
         if len > 0 {
-            let mut min_off = offset as isize;
-            let mut max_off = offset as isize;
+            let off_i = isize::try_from(offset)
+                .map_err(|_| NumPyError::IndexOutOfBounds("offset overflows isize".into()))?;
+            let mut min_off = off_i;
+            let mut max_off = off_i;
             for (&d, &st) in shape.iter().zip(strides.iter()) {
                 if d > 1 {
-                    let span = (d as isize - 1)
+                    let dm1 = isize::try_from(d - 1)
+                        .map_err(|_| NumPyError::ShapeMismatch("shape dimension overflows isize".into()))?;
+                    let span = dm1
                         .checked_mul(st)
                         .ok_or_else(|| NumPyError::ShapeMismatch("stride span overflow".into()))?;
                     if span < 0 {
@@ -137,8 +141,8 @@ impl<T> NdArray<T> {
     where
         T: Scalar,
     {
-        let len = shape_size(shape)?;
-        let buf = AlignedBuffer::new_zeroed(len);
+        let len = AlignedBuffer::<T>::check_shape_bytes::<T>(shape)?;
+        let buf = AlignedBuffer::try_new_zeroed(len)?;
         Self::from_aligned_buffer(buf, shape, order)
     }
 
@@ -163,8 +167,8 @@ impl<T> NdArray<T> {
     where
         T: Copy,
     {
-        let len = shape_size(shape)?;
-        let buf = AlignedBuffer::filled(len, value);
+        let len = AlignedBuffer::<T>::check_shape_bytes::<T>(shape)?;
+        let buf = AlignedBuffer::try_filled(len, value)?;
         Self::from_aligned_buffer(buf, shape, order)
     }
 
@@ -254,7 +258,7 @@ impl<T> NdArray<T> {
 
     #[inline]
     pub fn nbytes(&self) -> usize {
-        self.len * self.itemsize()
+        self.len.saturating_mul(self.itemsize())
     }
 
     #[inline]
@@ -408,6 +412,15 @@ impl<T> NdArray<T> {
         self.deep_copy(Order::F)
     }
 
+    /// Return a freshly allocated copy in `order` (`C`, `F`, `A`, `K`) — NumPy `ndarray.copy`.
+    #[inline]
+    pub fn copy(&self, order: Order) -> Self
+    where
+        T: Copy,
+    {
+        self.deep_copy(order)
+    }
+
     /// Return a freshly allocated copy in `order` (`C`, `F`, `A`, `K`).
     pub fn deep_copy(&self, order: Order) -> Self
     where
@@ -535,8 +548,15 @@ impl<T> NdArray<T> {
                     if count > 0 {
                         new_offset += (first as isize) * self.strides[src_axis];
                     }
+                    let new_stride = if count <= 1 {
+                        0
+                    } else {
+                        self.strides[src_axis].checked_mul(step).ok_or_else(|| {
+                            NumPyError::ShapeMismatch("slice stride overflow".into())
+                        })?
+                    };
                     new_shape.push(count);
-                    new_strides.push(self.strides[src_axis] * step);
+                    new_strides.push(new_stride);
                     src_axis += 1;
                 }
                 SliceArg::Ellipsis => unreachable!(),
@@ -643,7 +663,13 @@ impl<T> NdArray<T> {
             if dim > 1 && self.len > 0 {
                 new_offset += ((dim - 1) as isize) * new_strides[ax];
             }
-            new_strides[ax] = -new_strides[ax];
+            new_strides[ax] = if dim <= 1 {
+                new_strides[ax].checked_neg().unwrap_or(0)
+            } else {
+                new_strides[ax].checked_neg().ok_or_else(|| {
+                    NumPyError::ShapeMismatch("flip stride overflow".into())
+                })?
+            };
         }
         Ok(Self {
             storage: Arc::clone(&self.storage),
@@ -723,7 +749,7 @@ impl<T> NdArray<T> {
     /// O(1) broadcast array to `target_shape` (using 0-strides).
     pub fn broadcast_to(&self, target_shape: &[usize]) -> Result<Self> {
         let new_strides = broadcast_strides(&self.shape, &self.strides, target_shape)?;
-        let new_len = shape_size(target_shape)?;
+        let new_len = AlignedBuffer::<T>::check_shape_bytes::<T>(target_shape)?;
         Ok(Self {
             storage: Arc::clone(&self.storage),
             offset: if new_len == 0 { 0 } else { self.offset },
@@ -1014,7 +1040,7 @@ impl<'a, T> ArrayView<'a, T> {
     /// O(1) view broadcast.
     pub fn broadcast_to(&self, target_shape: &[usize]) -> Result<Self> {
         let new_strides = broadcast_strides(&self.shape, &self.strides, target_shape)?;
-        let new_len = shape_size(target_shape)?;
+        let new_len = AlignedBuffer::<T>::check_shape_bytes::<T>(target_shape)?;
         Ok(Self {
             ptr: if new_len == 0 {
                 NonNull::dangling()

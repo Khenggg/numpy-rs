@@ -32,23 +32,36 @@ pub fn python_exe() -> PathBuf {
         assert!(pb.exists(), "NUMPY_RS_PYTHON does not exist: {}", pb.display());
         return pb;
     }
-    let candidate = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join(".venv")
-        .join("Scripts")
-        .join("python.exe");
-    if candidate.exists() {
-        return candidate;
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+    let win_venv = repo_root.join(".venv").join("Scripts").join("python.exe");
+    if win_venv.exists() {
+        return win_venv;
+    }
+    let unix_venv = repo_root.join(".venv").join("bin").join("python");
+    if unix_venv.exists() {
+        return unix_venv;
     }
     let fallback = PathBuf::from(r"D:\numpy-rs\.venv\Scripts\python.exe");
-    assert!(
-        fallback.exists(),
-        "Python oracle not found at {} or {}",
-        candidate.display(),
-        fallback.display()
+    if fallback.exists() {
+        return fallback;
+    }
+    for cmd in ["python3", "python"] {
+        if Command::new(cmd)
+            .arg("-c")
+            .arg("import numpy")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+        {
+            return PathBuf::from(cmd);
+        }
+    }
+    panic!(
+        "Python NumPy oracle not found (set NUMPY_RS_PYTHON or create .venv; checked {} and {})",
+        win_venv.display(),
+        unix_venv.display()
     );
-    fallback
 }
 
 /// Execute a Python script via stdin on the live NumPy 2.5.4 oracle and return stdout.

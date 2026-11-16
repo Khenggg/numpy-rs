@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-tests:
+    name: Check & Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install NumPy 2.5.4 oracle
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "numpy==2.5.4"
+          python -c "import os, sys; f = open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8'); f.write(f'NUMPY_RS_PYTHON={sys.executable}\n'); f.close()"
+
+      - name: Workspace check (all targets, zero warnings)
+        env:
+          RUSTFLAGS: "-Dwarnings"
+        run: cargo check --workspace --all-targets --all-features
+
+      - name: Test facade (--no-default-features)
+        run: cargo test -p numpy-rs --no-default-features
+
+      - name: Test facade (default features)
+        run: cargo test -p numpy-rs
+
+      - name: Run full workspace test suite (excluding benchmarks)
+        run: cargo test --workspace --exclude numpy-bench --all-features --no-fail-fast
+
+  release-probes:
+    name: Differential & Audit Probes (${{ matrix.os }})
+    needs: build-and-tests
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install NumPy 2.5.4 oracle
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "numpy==2.5.4"
+          python -c "import os, sys; f = open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8'); f.write(f'NUMPY_RS_PYTHON={sys.executable}\n'); f.close()"
+
+      - name: Build release and artifact libraries for probes
+        run: |
+          cargo build --release -p numpy-types -p numpy-core -p numpy-ufunc -p numpy-linalg -p numpy-lib -p numpy-extra
+          cargo build -p numpy-lib -p numpy-extra
+
+      - name: Run differential probe corpus (4,214 cases vs NumPy 2.5.4)
+        run: python docs/probes/run_review.py
+
+      - name: Run bug audit probes & live oracle contracts
+        shell: pwsh
+        run: ./docs/probes/bug_audit/run.ps1 -IncludeArtifacts
+
+  coverage-and-doctests:
+    name: Coverage & Doctests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run workspace doctests
+        run: cargo test --workspace --exclude numpy-bench --all-features --doc
+
+      - name: Validate benchmark coverage audit script
+        run: python3 crates/numpy-bench/performance_matrix/audit_coverage.py --self-test

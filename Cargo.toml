@@ -52,3 +52,11 @@ codegen-units = 1
 opt-level = 3
 lto = "thin"
 codegen-units = 1
+
+[profile.dev]
+debug = 0
+incremental = false
+
+[profile.test]
+debug = 0
+incremental = false

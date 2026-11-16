@@ -2,3 +2,5 @@
 upstream-numpy/
 .venv/
 **/*.rs.bk
+crates/numpy-bench/*_results.json
+*.profraw
