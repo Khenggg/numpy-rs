@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -16,22 +17,80 @@ import warnings
 import numpy as np
 
 
-def latest_rlib(deps: Path, library: str, min_size: int = 0) -> Path | None:
-    matches = [p for p in deps.glob(f"lib{library}-*.rlib") if p.stat().st_size >= min_size]
+_SKIP_WALK_DIRS = frozenset({".fingerprint", "examples", "fingerprint", "incremental", "run"})
+_DEP_SUFFIXES = frozenset({".rlib", ".rmeta", ".so", ".dll", ".dylib"})
+
+
+def _profile_dir_info(profile_dir: Path) -> tuple[list[Path], dict[str, list[Path]]]:
+    """Collect `-L dependency=...` search dirs and `.rlib` candidates across Cargo <= 1.99
+    (`deps/`) and Cargo >= 1.100 (`build/<pkg>/<meta>/out/`) layouts without launching Cargo
+    or adding `<profile>/` root (which contains unhashed uplift `.rlib`s causing E0464)."""
+    dep_dirs: list[Path] = []
+    seen_dirs: set[Path] = set()
+    rlibs: dict[str, list[Path]] = {}
+    if not profile_dir.is_dir():
+        return dep_dirs, rlibs
+    for dirpath, dirnames, filenames in os.walk(profile_dir):
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_WALK_DIRS]
+        current = Path(dirpath)
+        if current == profile_dir:
+            continue
+        has_dep_artifact = False
+        for fname in filenames:
+            path = current / fname
+            suffix = path.suffix
+            if suffix in _DEP_SUFFIXES:
+                has_dep_artifact = True
+            if suffix == ".rlib" and fname.startswith("lib"):
+                stem = path.stem[3:]
+                crate = stem.rsplit("-", 1)[0] if "-" in stem else stem
+                rlibs.setdefault(crate, []).append(path)
+        if has_dep_artifact and current not in seen_dirs:
+            seen_dirs.add(current)
+            dep_dirs.append(current)
+    return dep_dirs, rlibs
+
+
+def _candidate_profiles(root: Path) -> list[tuple[str, list[Path], dict[str, list[Path]]]]:
+    build_root = Path(
+        os.environ.get("CARGO_BUILD_BUILD_DIR")
+        or os.environ.get("CARGO_TARGET_DIR")
+        or (root / "target")
+    )
+    profiles: list[tuple[str, list[Path], dict[str, list[Path]]]] = []
+    for name in ("release", "debug"):
+        dep_dirs, rlibs = _profile_dir_info(build_root / name)
+        if dep_dirs or rlibs:
+            profiles.append((name, dep_dirs, rlibs))
+    return profiles
+
+
+def latest_rlib(rlibs: dict[str, list[Path]], library: str, min_size: int = 0) -> Path | None:
+    matches = [p for p in rlibs.get(library, ()) if p.stat().st_size >= min_size]
     if not matches:
         return None
     return max(matches, key=lambda p: p.stat().st_mtime)
 
 
+def _dep_args(output: Path, name: str, dep_dirs: list[Path]) -> list[str]:
+    """Write `-L dependency=...` lines to a BOM-free response file so Windows never hits 32 KB cmd limits."""
+    if not dep_dirs:
+        return []
+    rsp = output / f"{name}.deps.rsp"
+    lines = [line for d in dep_dirs for line in ("-L", f"dependency={d}")]
+    rsp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return [f"@{rsp}"]
+
+
 def build(root: Path, output: Path, name: str, needs_zip: bool = False, needs_masked: bool = False) -> Path:
-    profiles = [root / "target" / "release" / "deps", root / "target" / "debug" / "deps"]
+    profiles = _candidate_profiles(root)
     if needs_masked:
         required = ["numpy_types", "numpy_core", "numpy_ufunc", "numpy_linalg", "numpy_lib", "numpy_extra"]
         choices = [
-            p
-            for p in profiles
+            (prof_name, dep_dirs, rlibs)
+            for prof_name, dep_dirs, rlibs in profiles
             if all(
-                latest_rlib(p, lib, min_size=100_000 if lib == "numpy_lib" else 0) is not None
+                latest_rlib(rlibs, lib, min_size=100_000 if lib == "numpy_lib" else 0) is not None
                 for lib in required
             )
         ]
@@ -42,18 +101,19 @@ def build(root: Path, output: Path, name: str, needs_zip: bool = False, needs_ma
             )
         binary = output / (name + (".exe" if sys.platform == "win32" else ""))
         last_err: subprocess.CalledProcessError | None = None
-        for deps in choices:
-            release = deps.parent.name == "release"
+        for prof_name, dep_dirs, rlibs in choices:
+            release = prof_name == "release"
             base_cmd = ["rustc", "-O", "--edition", "2024", "-A", "dead_code"]
             if release:
                 base_cmd += ["-C", "lto=thin", "-C", "codegen-units=1"]
+            dep_flags = _dep_args(output, name, dep_dirs)
             lib_candidates = sorted(
-                (p for p in deps.glob("libnumpy_lib-*.rlib") if p.stat().st_size >= 100_000),
+                (p for p in rlibs.get("numpy_lib", ()) if p.stat().st_size >= 100_000),
                 key=lambda p: p.stat().st_mtime,
                 reverse=True,
             )
-            ufunc_all = list(deps.glob("libnumpy_ufunc-*.rlib"))
-            types_all = list(deps.glob("libnumpy_types-*.rlib"))
+            ufunc_all = rlibs.get("numpy_ufunc", [])
+            types_all = rlibs.get("numpy_types", [])
             for lib_art in lib_candidates:
                 lib_mtime = lib_art.stat().st_mtime
                 by_proximity = lambda p: (
@@ -65,14 +125,19 @@ def build(root: Path, output: Path, name: str, needs_zip: bool = False, needs_ma
                 types_candidates = sorted(types_all, key=by_proximity, reverse=True)
                 for ufunc_art in ufunc_candidates:
                     for types_art in types_candidates:
-                        command = base_cmd + [
-                            "--extern", f"numpy_types={types_art}",
-                            "--extern", f"numpy_lib={lib_art}",
-                            "--extern", f"numpy_ufunc={ufunc_art}",
-                            "-L", f"dependency={deps}",
-                            str(root / "docs" / "probes" / f"{name}.rs"),
-                            "-o", str(binary),
-                        ]
+                        command = (
+                            base_cmd
+                            + [
+                                "--extern", f"numpy_types={types_art}",
+                                "--extern", f"numpy_lib={lib_art}",
+                                "--extern", f"numpy_ufunc={ufunc_art}",
+                            ]
+                            + dep_flags
+                            + [
+                                str(root / "docs" / "probes" / f"{name}.rs"),
+                                "-o", str(binary),
+                            ]
+                        )
                         try:
                             subprocess.run(command, cwd=root, check=True, capture_output=True, text=True)
                             return binary
@@ -83,25 +148,30 @@ def build(root: Path, output: Path, name: str, needs_zip: bool = False, needs_ma
         raise last_err
     else:
         externs = ["numpy_types"] + (["zip"] if needs_zip else [])
-        choices = [p for p in profiles if all(latest_rlib(p, lib) is not None for lib in externs)]
+        choices = [
+            (prof_name, dep_dirs, rlibs)
+            for prof_name, dep_dirs, rlibs in profiles
+            if all(latest_rlib(rlibs, lib) is not None for lib in externs)
+        ]
         if not choices:
             raise RuntimeError(
-                f"Missing required artifact(s) ({', '.join(externs)}) in release or debug target/deps; "
+                f"Missing required artifact(s) ({', '.join(externs)}) in release or debug target artifacts; "
                 "build workspace dependencies first"
             )
-        deps = choices[0]
+        prof_name, dep_dirs, rlibs = choices[0]
 
-    release = deps.parent.name == "release"
+    release = prof_name == "release"
     command = ["rustc", "-O", "--edition", "2024", "-A", "dead_code"]
     if release:
         command += ["-C", "lto=thin", "-C", "codegen-units=1"]
     for library in externs:
-        artifact = latest_rlib(deps, library)
+        artifact = latest_rlib(rlibs, library)
         if artifact is None:
-            raise RuntimeError(f"Missing {library} artifact in {deps}; build workspace dependencies first")
+            raise RuntimeError(f"Missing {library} artifact in {prof_name} build; build workspace dependencies first")
         command += ["--extern", f"{library}={artifact}"]
     binary = output / (name + (".exe" if sys.platform == "win32" else ""))
-    command += ["-L", f"dependency={deps}", str(root / "docs" / "probes" / f"{name}.rs"), "-o", str(binary)]
+    dep_flags = _dep_args(output, name, dep_dirs)
+    command += dep_flags + [str(root / "docs" / "probes" / f"{name}.rs"), "-o", str(binary)]
     subprocess.run(command, cwd=root, check=True)
     return binary
 

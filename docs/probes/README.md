@@ -8,7 +8,7 @@ Run from the repository with its NumPy Python environment:
 
 Select a smaller review with `--only datetime`, `--only npy`, `--only masked`, or `--only kernels`. `--root PATH` selects another checkout. Generated fixtures, binaries, and `review_results.json` go under that checkout's ignored `target/perf-review/` directory.
 
-The script never launches Cargo or edits production source. Semantic probes compile the current production Rust modules directly and reuse existing `numpy-types` and `zip` dependency artifacts from `target/release/deps` (preferred) or `target/debug/deps`. Run a normal workspace build first if those dependencies are missing. This avoids recompiling all ufunc dispatch instantiations during a focused review. The kernel benchmark only uses Rust's standard library.
+The script never launches Cargo or edits production source. Semantic probes compile the current production Rust modules directly and reuse existing `numpy-types` and `zip` dependency artifacts from `target/release` (preferred) or `target/debug` (supporting both Cargo's legacy `deps/` layout and Rust 1.100+ unit `build/` layout). Run a normal workspace build first if those dependencies are missing. This avoids recompiling all ufunc dispatch instantiations during a focused review. The kernel benchmark only uses Rust's standard library.
 
 `datetime_probe.rs` checks fixed-unit casts, BCE formatting, business-day offsets with six roll modes and two holiday calendars, reversed business counts, duration promotion, exact subtraction before downcast, cross-unit equality, and NaT inequality against live NumPy. The original extended suite contains 1,882 cases.
 
