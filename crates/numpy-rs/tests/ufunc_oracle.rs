@@ -686,8 +686,9 @@ emit_arr("max_neg0", np.array(np.maximum.reduce(neg0), dtype=np.float64))
     assert_dyn_matches_oracle(&minimum(&da64, &db64).unwrap(), oracle.arr("min64"), 0., 0., true, true, "min64");
     assert_dyn_matches_oracle(&maximum(&da32, &db32).unwrap(), oracle.arr("max32"), 0., 0., true, true, "max32");
     assert_dyn_matches_oracle(&minimum(&da32, &db32).unwrap(), oracle.arr("min32"), 0., 0., true, true, "min32");
-    assert_dyn_matches_oracle(&fmax(&da64, &db64).unwrap(), oracle.arr("fmax64"), 0., 0., true, true, "fmax64");
-    assert_dyn_matches_oracle(&fmin(&da64, &db64).unwrap(), oracle.arr("fmin64"), 0., 0., true, true, "fmin64");
+    // fmax/fmin signed-zero order is unspecified and varies across NumPy SIMD/OS backends (f64 vs f32, Linux vs Windows); test NaN-skipping + value equality.
+    assert_dyn_matches_oracle(&fmax(&da64, &db64).unwrap(), oracle.arr("fmax64"), 0., 0., true, false, "fmax64");
+    assert_dyn_matches_oracle(&fmin(&da64, &db64).unwrap(), oracle.arr("fmin64"), 0., 0., true, false, "fmin64");
 
     // FIX(F-A2-03): singleton [-0.0] reduction seeds accumulator with identity
     let dneg0 = DynArray::F64(neg0);
