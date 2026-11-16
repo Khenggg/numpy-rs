@@ -625,10 +625,14 @@ fn p0_p1_int_reciprocal_neg_zero_max_min_reduce_and_initial_bounds() {
     let neg0 = NdArray::from_vec(vec![-0.0f64]);
     let i8_a = NdArray::from_vec(vec![0i8, 1, -2, 2]);
     let i16_a = NdArray::from_vec(vec![0i16, 1, -2, 2]);
+    let i32_a = NdArray::from_vec(vec![0i32, 1, -2, 2]);
+    let i64_a = NdArray::from_vec(vec![0i64, 1, -2, 2]);
+    let u32_a = NdArray::from_vec(vec![0u32, 1, 2]);
+    let u64_nz = NdArray::from_vec(vec![1u64, 2]);
     let u64_a = NdArray::from_vec(vec![0u64, 1, 2]);
 
     let oracle = run_oracle(&format!(
-        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         py_assign_dyn("a64", &DynArray::F64(a64.clone())),
         py_assign_dyn("b64", &DynArray::F64(b64.clone())),
         py_assign_dyn("a32", &DynArray::F32(a32.clone())),
@@ -636,10 +640,18 @@ fn p0_p1_int_reciprocal_neg_zero_max_min_reduce_and_initial_bounds() {
         py_assign_dyn("neg0", &DynArray::F64(neg0.clone())),
         py_assign_dyn("i8_a", &DynArray::I8(i8_a.clone())),
         py_assign_dyn("i16_a", &DynArray::I16(i16_a.clone())),
+        py_assign_dyn("i32_a", &DynArray::I32(i32_a.clone())),
+        py_assign_dyn("i64_a", &DynArray::I64(i64_a.clone())),
+        py_assign_dyn("u32_a", &DynArray::U32(u32_a.clone())),
+        py_assign_dyn("u64_nz", &DynArray::U64(u64_nz.clone())),
         py_assign_dyn("u64_a", &DynArray::U64(u64_a.clone())),
         r#"
 emit_arr("rec_i8", np.reciprocal(i8_a))
 emit_arr("rec_i16", np.reciprocal(i16_a))
+emit_arr("rec_i32", np.reciprocal(i32_a))
+emit_arr("rec_i64", np.reciprocal(i64_a))
+emit_arr("rec_u32", np.reciprocal(u32_a))
+emit_arr("rec_u64_nz", np.reciprocal(u64_nz))
 emit_arr("rec_u64", np.reciprocal(u64_a))
 emit_arr("max64", np.maximum(a64, b64))
 emit_arr("min64", np.minimum(a64, b64))
@@ -653,10 +665,17 @@ emit_arr("max_neg0", np.array(np.maximum.reduce(neg0), dtype=np.float64))
 "#
     ));
 
-    // FIX(F-A2-01): integer reciprocal at 0
+    // FIX(F-A2-01): integer reciprocal at 0 (note: C `(uint64_t)(+Inf)` is compiler UB between MSVC `1<<63` and GCC `0`)
     assert_dyn_matches_oracle(&reciprocal(&DynArray::I8(i8_a)).unwrap(), oracle.arr("rec_i8"), 0., 0., false, false, "rec_i8");
     assert_dyn_matches_oracle(&reciprocal(&DynArray::I16(i16_a)).unwrap(), oracle.arr("rec_i16"), 0., 0., false, false, "rec_i16");
-    assert_dyn_matches_oracle(&reciprocal(&DynArray::U64(u64_a)).unwrap(), oracle.arr("rec_u64"), 0., 0., false, false, "rec_u64");
+    assert_dyn_matches_oracle(&reciprocal(&DynArray::I32(i32_a)).unwrap(), oracle.arr("rec_i32"), 0., 0., false, false, "rec_i32");
+    assert_dyn_matches_oracle(&reciprocal(&DynArray::I64(i64_a)).unwrap(), oracle.arr("rec_i64"), 0., 0., false, false, "rec_i64");
+    assert_dyn_matches_oracle(&reciprocal(&DynArray::U32(u32_a)).unwrap(), oracle.arr("rec_u32"), 0., 0., false, false, "rec_u32");
+    assert_dyn_matches_oracle(&reciprocal(&DynArray::U64(u64_nz)).unwrap(), oracle.arr("rec_u64_nz"), 0., 0., false, false, "rec_u64_nz");
+    let rec_u64 = reciprocal(&DynArray::U64(u64_a)).unwrap();
+    assert_eq!(NdArray::<u64>::try_from(rec_u64.clone()).unwrap().to_vec(), vec![1u64 << 63, 1, 0]);
+    #[cfg(target_os = "windows")]
+    assert_dyn_matches_oracle(&rec_u64, oracle.arr("rec_u64"), 0., 0., false, false, "rec_u64");
 
     // FIX(F-A2-02 + T-AUD-UFUNC-NAN): maximum/minimum/fmax/fmin signed zero & NaN
     let da64 = DynArray::F64(a64);
