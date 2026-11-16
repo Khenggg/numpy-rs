@@ -256,11 +256,11 @@ impl_ugcd_ulcm!(gcd_u64, lcm_u64, u64);
 
 #[inline]
 pub fn int_recip_i8(a: i8) -> i8 {
-    if a == 0 { i8::MIN } else { (1.0 / (a as f64)) as i8 }
+    if a == 0 { 0 } else { (1.0 / (a as f64)) as i8 }
 }
 #[inline]
 pub fn int_recip_i16(a: i16) -> i16 {
-    if a == 0 { i16::MIN } else { (1.0 / (a as f64)) as i16 }
+    if a == 0 { 0 } else { (1.0 / (a as f64)) as i16 }
 }
 #[inline]
 pub fn int_recip_i32(a: i32) -> i32 {
@@ -284,7 +284,7 @@ pub fn int_recip_u32(a: u32) -> u32 {
 }
 #[inline]
 pub fn int_recip_u64(a: u64) -> u64 {
-    if a == 0 { 0 } else { (1.0 / (a as f64)) as u64 }
+    if a == 0 { 1u64 << 63 } else { (1.0 / (a as f64)) as u64 }
 }
 
 // ============================================================================
@@ -986,11 +986,11 @@ pub fn round_f16(x: f16, decimals: i32) -> f16 {
 
 #[inline]
 pub fn max_prop_nan_f64(a: f64, b: f64) -> f64 {
-    if a >= b || a.is_nan() { a } else { b }
+    if a > b || a.is_nan() { a } else { b }
 }
 #[inline]
 pub fn min_prop_nan_f64(a: f64, b: f64) -> f64 {
-    if a <= b || a.is_nan() { a } else { b }
+    if a < b || a.is_nan() { a } else { b }
 }
 #[inline]
 pub fn fmax_f64(a: f64, b: f64) -> f64 {
@@ -998,7 +998,7 @@ pub fn fmax_f64(a: f64, b: f64) -> f64 {
         a
     } else if a.is_nan() {
         b
-    } else if a >= b {
+    } else if a > b {
         a
     } else {
         b
@@ -1010,7 +1010,7 @@ pub fn fmin_f64(a: f64, b: f64) -> f64 {
         a
     } else if a.is_nan() {
         b
-    } else if a <= b {
+    } else if a < b {
         a
     } else {
         b
@@ -1019,11 +1019,11 @@ pub fn fmin_f64(a: f64, b: f64) -> f64 {
 
 #[inline]
 pub fn max_prop_nan_f32(a: f32, b: f32) -> f32 {
-    if a >= b || a.is_nan() { a } else { b }
+    if a > b || a.is_nan() { a } else { b }
 }
 #[inline]
 pub fn min_prop_nan_f32(a: f32, b: f32) -> f32 {
-    if a <= b || a.is_nan() { a } else { b }
+    if a < b || a.is_nan() { a } else { b }
 }
 #[inline]
 pub fn fmax_f32(a: f32, b: f32) -> f32 {
@@ -1031,7 +1031,7 @@ pub fn fmax_f32(a: f32, b: f32) -> f32 {
         a
     } else if a.is_nan() {
         b
-    } else if a >= b {
+    } else if a > b {
         a
     } else {
         b
@@ -1043,7 +1043,7 @@ pub fn fmin_f32(a: f32, b: f32) -> f32 {
         a
     } else if a.is_nan() {
         b
-    } else if a <= b {
+    } else if a < b {
         a
     } else {
         b
@@ -1054,13 +1054,13 @@ pub fn fmin_f32(a: f32, b: f32) -> f32 {
 pub fn max_prop_nan_f16(a: f16, b: f16) -> f16 {
     let af = a.to_f32();
     let bf = b.to_f32();
-    if af >= bf || af.is_nan() { a } else { b }
+    if af > bf || af.is_nan() { a } else { b }
 }
 #[inline]
 pub fn min_prop_nan_f16(a: f16, b: f16) -> f16 {
     let af = a.to_f32();
     let bf = b.to_f32();
-    if af <= bf || af.is_nan() { a } else { b }
+    if af < bf || af.is_nan() { a } else { b }
 }
 #[inline]
 pub fn fmax_f16(a: f16, b: f16) -> f16 {
@@ -1068,7 +1068,7 @@ pub fn fmax_f16(a: f16, b: f16) -> f16 {
         a
     } else if a.is_nan() {
         b
-    } else if a.to_f32() >= b.to_f32() {
+    } else if a.to_f32() > b.to_f32() {
         a
     } else {
         b
@@ -1080,7 +1080,7 @@ pub fn fmin_f16(a: f16, b: f16) -> f16 {
         a
     } else if a.is_nan() {
         b
-    } else if a.to_f32() <= b.to_f32() {
+    } else if a.to_f32() < b.to_f32() {
         a
     } else {
         b

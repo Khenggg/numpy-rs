@@ -57,13 +57,13 @@ impl RandomState {
     }
 
     /// Construct a `RandomState` using legacy key-array seeding (`init_by_array`).
-    pub fn from_seed_slice(key: &[u32]) -> Self {
-        Self {
-            mt: MT19937::from_legacy_key(key),
+    pub fn from_seed_slice(key: &[u32]) -> Result<Self> {
+        Ok(Self {
+            mt: MT19937::from_legacy_key(key)?,
             has_gauss: false,
             gauss: 0.0,
             binomial: BinomialState::default(),
-        }
+        })
     }
 
     /// Construct a `RandomState` backed by an explicit [`SeedSequence`].
@@ -95,11 +95,12 @@ impl RandomState {
     }
 
     /// Re-seed this `RandomState` in place using an array of 32-bit seed words.
-    pub fn seed_slice(&mut self, key: &[u32]) {
-        self.mt.legacy_seed_array(key);
+    pub fn seed_slice(&mut self, key: &[u32]) -> Result<()> {
+        self.mt.legacy_seed_array(key)?;
         self.has_gauss = false;
         self.gauss = 0.0;
         self.binomial.reset();
+        Ok(())
     }
 
     /// Return a snapshot of the internal state (`get_state`).
@@ -135,7 +136,7 @@ impl RandomState {
 
     #[inline]
     fn check_non_neg(name: &str, v: f64) -> Result<()> {
-        if v.is_nan() || v < 0.0 {
+        if v.is_nan() || v.is_sign_negative() {
             return Err(NumPyError::InvalidValue(format!("{name} < 0")));
         }
         Ok(())
@@ -581,7 +582,7 @@ impl RandomState {
     }
 
     pub fn vonmises(&mut self, mu: f64, kappa: f64, shape: &[usize]) -> Result<NdArray<f64>> {
-        if kappa < 0.0 {
+        if !kappa.is_nan() && kappa.is_sign_negative() {
             return Err(NumPyError::InvalidValue("kappa < 0".into()));
         }
         let mt = &mut self.mt;

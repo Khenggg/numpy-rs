@@ -344,13 +344,8 @@ pub fn put<T: Scalar>(
     mode: IndexMode,
 ) -> Result<()> {
     let n_ind = ind.len();
-    if n_ind == 0 {
+    if n_ind == 0 || v.is_empty() {
         return Ok(());
-    }
-    if v.is_empty() {
-        return Err(NumPyError::InvalidValue(
-            "cannot put from an empty values array".into(),
-        ));
     }
     let total = arr.len();
     let idx_c = ind.to_c_contiguous();
@@ -450,7 +445,12 @@ pub fn putmask<T: Scalar>(
     values: &NdArray<T>,
 ) -> Result<()> {
     let shape = arr.shape().to_vec();
-    let mask_b = mask.broadcast_to(&shape)?.to_c_contiguous();
+    if mask.len() != arr.len() {
+        return Err(NumPyError::InvalidValue(
+            "putmask: mask and data must be the same size".into(),
+        ));
+    }
+    let mask_b = mask.ravel(Order::C);
     let mask_sl = mask_b.as_slice().unwrap_or(&[]);
     if !mask_sl.iter().any(|&b| b) {
         return Ok(());
@@ -540,13 +540,6 @@ pub fn extract<T: Scalar + Send + Sync>(
 ) -> Result<NdArray<T>> {
     let flat_arr = arr.ravel(Order::C);
     let flat_cond = condition.ravel(Order::C);
-    if flat_cond.len() != flat_arr.len() {
-        return Err(NumPyError::ShapeMismatch(format!(
-            "extract condition length ({}) must match array size ({})",
-            flat_cond.len(),
-            flat_arr.len()
-        )));
-    }
     compress(&flat_cond, &flat_arr, Some(0))
 }
 
@@ -1122,6 +1115,11 @@ pub fn unravel_index(
     shape: &[usize],
     order: Order,
 ) -> Result<Vec<NdArray<i64>>> {
+    if !matches!(order, Order::C | Order::F) {
+        return Err(NumPyError::InvalidValue(
+            "only 'C' or 'F' order is permitted".into(),
+        ));
+    }
     let ndim = shape.len();
     let size = shape_size(shape)?;
     let out_shape = indices.shape().to_vec();
@@ -1218,9 +1216,32 @@ pub fn ravel_multi_index(
 
     let shapes: Vec<&[usize]> = multi_index.iter().map(|a| a.shape()).collect();
     let out_shape = broadcast_many_shapes(&shapes)?;
+
+    // Reject oversized dims (product of non-zero dimensions > isize::MAX) before empty short-circuit,
+    // matching NumPy's check even when multi_index arrays or other dims are empty.
+    let mut nonzero_prod: i128 = 1;
+    for &d in dims {
+        if d != 0 {
+            nonzero_prod = nonzero_prod
+                .checked_mul(d as i128)
+                .filter(|&p| p <= isize::MAX as i128)
+                .ok_or_else(|| {
+                    NumPyError::InvalidValue(
+                        "invalid dims: array size defined by dims is larger than the maximum possible size."
+                            .into(),
+                    )
+                })?;
+        }
+    }
+
     let n = shape_size(&out_shape)?;
     if n == 0 {
         return finish_c_array(AlignedBuffer::<i64>::new_zeroed(0), &out_shape);
+    }
+    if dims.contains(&0) {
+        return Err(NumPyError::InvalidValue(
+            "cannot unravel if shape has zero entries (is empty).".into(),
+        ));
     }
 
     let bcast: Vec<NdArray<i64>> = multi_index
@@ -1234,16 +1255,16 @@ pub fn ravel_multi_index(
 
     let mut strides = vec![1i64; dims.len()];
     if matches!(order, Order::F) {
-        let mut acc = 1i64;
+        let mut acc: i128 = 1;
         for d in 0..dims.len() {
-            strides[d] = acc;
-            acc *= dims[d] as i64;
+            strides[d] = acc as i64;
+            acc *= dims[d] as i128;
         }
     } else {
-        let mut acc = 1i64;
+        let mut acc: i128 = 1;
         for d in (0..dims.len()).rev() {
-            strides[d] = acc;
-            acc *= dims[d] as i64;
+            strides[d] = acc as i64;
+            acc *= dims[d] as i128;
         }
     }
 
@@ -1265,30 +1286,30 @@ pub fn ravel_multi_index(
                 let base = chunk_idx * 4096;
                 for (j, slot) in chunk.iter_mut().enumerate() {
                     let k = base + j;
-                    let mut sum = 0i64;
+                    let mut sum: i128 = 0;
                     for (d, (&dim, &sl)) in dims.iter().zip(idx_slices.iter()).enumerate() {
                         let r = match mode {
                             IndexMode::Raise => sl[k],
                             IndexMode::Wrap => sl[k].rem_euclid(dim as i64),
                             IndexMode::Clip => sl[k].clamp(0, (dim - 1) as i64),
                         };
-                        sum += r * strides[d];
+                        sum += (r as i128) * (strides[d] as i128);
                     }
-                    slot.write(sum);
+                    slot.write(sum as i64);
                 }
             });
     } else {
         for (k, slot) in dst.iter_mut().enumerate() {
-            let mut sum = 0i64;
+            let mut sum: i128 = 0;
             for (d, (&dim, &sl)) in dims.iter().zip(idx_slices.iter()).enumerate() {
                 let r = match mode {
                     IndexMode::Raise => sl[k],
                     IndexMode::Wrap => sl[k].rem_euclid(dim as i64),
                     IndexMode::Clip => sl[k].clamp(0, (dim - 1) as i64),
                 };
-                sum += r * strides[d];
+                sum += (r as i128) * (strides[d] as i128);
             }
-            slot.write(sum);
+            slot.write(sum as i64);
         }
     }
 

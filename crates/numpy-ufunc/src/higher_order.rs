@@ -218,6 +218,99 @@ impl ScalarValue {
             },
         }
     }
+
+    /// Strict NumPy-compatible conversion for `reduce(..., initial=...)` matching NumPy's
+    /// scalar-to-dtype validation (rejecting NaN / infinity / out-of-bounds ints instead of saturating).
+    pub fn try_cast_initial(self, target: DType) -> Result<Self> {
+        if self.dtype() == target {
+            return Ok(self);
+        }
+        if matches!(self, Self::C64(_) | Self::C128(_)) && !target.is_complex() && target != DType::Bool
+        {
+            return Err(NumPyError::DTypeError(format!(
+                "Cannot cast scalar complex initial value to dtype('{target}')"
+            )));
+        }
+        if !target.is_integer() {
+            return Ok(self.cast_to(target));
+        }
+
+        let val_i128: Option<i128> = match self {
+            Self::Bool(b) => Some(i128::from(b)),
+            Self::I8(v) => Some(i128::from(v)),
+            Self::I16(v) => Some(i128::from(v)),
+            Self::I32(v) => Some(i128::from(v)),
+            Self::I64(v) => Some(i128::from(v)),
+            Self::U8(v) => Some(i128::from(v)),
+            Self::U16(v) => Some(i128::from(v)),
+            Self::U32(v) => Some(i128::from(v)),
+            Self::U64(v) => Some(i128::from(v)),
+            Self::F16(_) | Self::F32(_) | Self::F64(_) => None,
+            Self::C64(_) | Self::C128(_) => unreachable!(),
+        };
+
+        if let Some(iv) = val_i128 {
+            return match target {
+                DType::I8 => i8::try_from(iv).map(Self::I8),
+                DType::I16 => i16::try_from(iv).map(Self::I16),
+                DType::I32 => i32::try_from(iv).map(Self::I32),
+                DType::I64 => i64::try_from(iv).map(Self::I64),
+                DType::U8 => u8::try_from(iv).map(Self::U8),
+                DType::U16 => u16::try_from(iv).map(Self::U16),
+                DType::U32 => u32::try_from(iv).map(Self::U32),
+                DType::U64 => u64::try_from(iv).map(Self::U64),
+                _ => unreachable!(),
+            }
+            .map_err(|_| {
+                NumPyError::InvalidValue(format!("initial integer {iv} out of bounds for {target}"))
+            });
+        }
+
+        let fv = match self {
+            Self::F16(v) => v.to_f64(),
+            Self::F32(v) => v as f64,
+            Self::F64(v) => v,
+            _ => unreachable!(),
+        };
+        if fv.is_nan() {
+            return Err(NumPyError::InvalidValue(
+                "cannot convert float NaN to integer".into(),
+            ));
+        }
+        if !fv.is_finite() {
+            return Err(NumPyError::InvalidValue(
+                "cannot convert float infinity to integer".into(),
+            ));
+        }
+        let t = fv.trunc();
+        let in_range = match target {
+            DType::I8 => (-128.0..=127.0).contains(&t),
+            DType::I16 => (-32768.0..=32767.0).contains(&t),
+            DType::I32 => (-2147483648.0..=2147483647.0).contains(&t),
+            DType::I64 => (-9223372036854775808.0..9223372036854775808.0).contains(&t),
+            DType::U8 => (0.0..=255.0).contains(&t),
+            DType::U16 => (0.0..=65535.0).contains(&t),
+            DType::U32 => (0.0..=4294967295.0).contains(&t),
+            DType::U64 => (0.0..18446744073709551616.0).contains(&t),
+            _ => unreachable!(),
+        };
+        if !in_range {
+            return Err(NumPyError::InvalidValue(format!(
+                "initial float {fv} too big to convert to {target}"
+            )));
+        }
+        Ok(match target {
+            DType::I8 => Self::I8(t as i8),
+            DType::I16 => Self::I16(t as i16),
+            DType::I32 => Self::I32(t as i32),
+            DType::I64 => Self::I64(t as i64),
+            DType::U8 => Self::U8(t as u8),
+            DType::U16 => Self::U16(t as u16),
+            DType::U32 => Self::U32(t as u32),
+            DType::U64 => Self::U64(t as u64),
+            _ => unreachable!(),
+        })
+    }
 }
 
 /// Binary ufunc descriptor supporting `.reduce`, `.accumulate`, `.outer`, and `.at`.
@@ -1823,7 +1916,7 @@ fn reduce_homogeneous<T: HigherOrderScalar>(
         )));
     }
     let init_typed: Option<T> = match initial {
-        Some(v) => Some(T::from_scalar_value(v.cast_to(T::DTYPE))?),
+        Some(v) => Some(T::from_scalar_value(v.try_cast_initial(T::DTYPE)?)?),
         None => None,
     };
     let ident_typed: Option<T> = match raw_identity(op, T::DTYPE) {
@@ -1917,6 +2010,7 @@ fn reduce_closure_nd<T: Scalar>(
     }
 
     let mut uninit = AlignedBuffer::<T>::new_uninit(out_len);
+    let seed = init.or(ident);
 
     // Whole-array contiguous fast path.
     if axes.len() == shape.len() {
@@ -1932,13 +2026,16 @@ fn reduce_closure_nd<T: Scalar>(
                         acc
                     })
                     .collect();
-                let mut acc = partials[0];
-                for &x in &partials[1..] {
+                let (mut acc, rest) = match seed {
+                    Some(v) => (v, partials.as_slice()),
+                    None => (partials[0], &partials[1..]),
+                };
+                for &x in rest {
                     acc = op(acc, x);
                 }
                 acc
             } else {
-                let (mut acc, rest) = match init {
+                let (mut acc, rest) = match seed {
                     Some(v) => (v, slice),
                     None => (slice[0], &slice[1..]),
                 };
@@ -1966,7 +2063,7 @@ fn reduce_closure_nd<T: Scalar>(
             if inner == 1 {
                 let do_row = |o: usize| -> T {
                     let row = &slice[o * k..(o + 1) * k];
-                    let (mut acc, rest) = match init {
+                    let (mut acc, rest) = match seed {
                         Some(v) => (v, row),
                         None => (row[0], &row[1..]),
                     };
@@ -1990,7 +2087,7 @@ fn reduce_closure_nd<T: Scalar>(
             } else {
                 let do_outer = |(o, out_row): (usize, &mut [std::mem::MaybeUninit<T>])| {
                     let row0 = &slice[(o * k) * inner..(o * k + 1) * inner];
-                    match init {
+                    match seed {
                         Some(v) => {
                             for j in 0..inner {
                                 out_row[j].write(op(v, row0[j]));
@@ -2039,7 +2136,7 @@ fn reduce_closure_nd<T: Scalar>(
     let compute_elem = |out_idx: usize| -> T {
         let base_off = linear_to_coords_off(out_idx, &kept_axes, shape, strides);
         let first_off = base_off;
-        let (mut acc, start_r) = match init {
+        let (mut acc, start_r) = match seed {
             Some(v) => (v, 0usize),
             None => (unsafe { ptr.add_offset(first_off) }, 1usize),
         };
@@ -2094,10 +2191,11 @@ fn try_reduce_nd<T: Scalar>(
     let ptr = unsafe { SendPtr(a.storage_ptr().add(a.offset())) };
     let mut uninit = AlignedBuffer::<T>::new_uninit(out_len);
     let out_slice = uninit.as_mut_slice();
+    let seed = init.or(ident);
 
     for (out_idx, slot) in out_slice.iter_mut().enumerate() {
         let base_off = linear_to_coords_off(out_idx, &kept_axes, shape, strides);
-        let (mut acc, start_r) = match init {
+        let (mut acc, start_r) = match seed {
             Some(v) => (v, 0usize),
             None => (unsafe { ptr.add_offset(base_off) }, 1usize),
         };

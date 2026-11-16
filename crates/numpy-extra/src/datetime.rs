@@ -23,6 +23,13 @@ pub enum TimeUnit {
     Attosecond,
 }
 impl TimeUnit {
+    fn average_seconds(self) -> Option<i128> {
+        Some(match self {
+            Self::Year => 31_556_952,
+            Self::Month => 2_629_746,
+            _ => return None,
+        })
+    }
     fn attoseconds(self) -> Option<i128> {
         Some(match self {
             Self::Year | Self::Month => return None,
@@ -403,6 +410,8 @@ impl TimeDelta64 {
         if self.unit == unit {
             return Ok(self);
         }
+        // FIX(F-B1-03): support calendar <-> fixed casts via NumPy's Gregorian average year (31,556,952 s) and month (2,629,746 s).
+        const ATTO_PER_SEC: i128 = 1_000_000_000_000_000_000;
         let value = match (self.unit.attoseconds(), unit.attoseconds()) {
             (Some(from), Some(to)) => {
                 if from >= to {
@@ -420,10 +429,42 @@ impl TimeDelta64 {
                     (self.value as i128).div_euclid(12)
                 }
             }
-            _ => {
-                return Err(invalid(
-                    "cannot convert between calendar and fixed duration units",
-                ));
+            (None, Some(to_attos)) => {
+                let src_sec = self
+                    .unit
+                    .average_seconds()
+                    .ok_or_else(|| invalid("invalid calendar time unit"))?;
+                if to_attos >= ATTO_PER_SEC {
+                    let to_sec = to_attos / ATTO_PER_SEC;
+                    (self.value as i128)
+                        .checked_mul(src_sec)
+                        .ok_or_else(|| invalid("timedelta overflow"))?
+                        .div_euclid(to_sec)
+                } else {
+                    let subsec_factor = ATTO_PER_SEC / to_attos;
+                    (self.value as i128)
+                        .checked_mul(src_sec)
+                        .and_then(|v| v.checked_mul(subsec_factor))
+                        .ok_or_else(|| invalid("timedelta overflow"))?
+                }
+            }
+            (Some(from_attos), None) => {
+                let dst_sec = unit
+                    .average_seconds()
+                    .ok_or_else(|| invalid("invalid calendar time unit"))?;
+                if from_attos >= ATTO_PER_SEC {
+                    let from_sec = from_attos / ATTO_PER_SEC;
+                    (self.value as i128)
+                        .checked_mul(from_sec)
+                        .ok_or_else(|| invalid("timedelta overflow"))?
+                        .div_euclid(dst_sec)
+                } else {
+                    let subsec_factor = ATTO_PER_SEC / from_attos;
+                    let denom = dst_sec
+                        .checked_mul(subsec_factor)
+                        .ok_or_else(|| invalid("timedelta overflow"))?;
+                    (self.value as i128).div_euclid(denom)
+                }
             }
         };
         Ok(Self::new(checked(value)?, unit))

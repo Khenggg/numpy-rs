@@ -807,3 +807,101 @@ emit_arr("v3_map", (a3.transpose(2, 0, 1)[::-1, :, ::-2] + 10))
     assert_eq!(a33_flip.to_c_contiguous().to_vec(), vec![60, 50, 40, 30, 20, 10]);
     assert_eq!(a33_flip.map(|x| x + 1).to_vec(), vec![61, 51, 41, 31, 21, 11]);
 }
+
+#[test]
+fn test_p0_p1_astype_float_to_int_strides_slicearg_and_overflow_safety() {
+    // FIX(F-A4-01, F-B1-04): float->int edge values (NaN, +-Inf, out-of-range, neg-to-unsigned)
+    let vals = vec![
+        0.0f64,
+        -0.0,
+        1.5,
+        -1.5,
+        -129.0,
+        128.0,
+        256.0,
+        -2147483648.0,
+        2147483648.0,
+        -9.223372036854776e18, // -2^63
+        9.223372036854776e18,  // +2^63
+        1.8446744073709552e19, // +2^64
+        1e20,
+        -1e20,
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+    ];
+    let f64_arr = NdArray::from_vec(vals.clone());
+    let f32_arr = NdArray::from_vec(vals.iter().map(|&v| v as f32).collect());
+    let oracle = run_oracle(&format!(
+        "{}\n{}\n{}",
+        common::py_assign_f64("xf64", &f64_arr),
+        common::py_assign_f32("xf32", &f32_arr),
+        r#"
+for src_name, src in [('f64', xf64), ('f32', xf32)]:
+    for dt_name, dt in [
+        ('i8', np.int8), ('i16', np.int16), ('i32', np.int32), ('i64', np.int64),
+        ('u8', np.uint8), ('u16', np.uint16), ('u32', np.uint32), ('u64', np.uint64),
+    ]:
+        emit_arr(f'{src_name}_{dt_name}', src.astype(dt))
+a10 = np.arange(10, dtype=np.int64)
+emit_arr('s_5_6', a10[5:6])
+emit_arr('s_0_0', a10[0:0])
+emit_arr('m_3_4', a10.reshape(2, 5)[1:2, :])
+emit_arr('z_0_3', np.zeros((0, 3), dtype=np.int32))
+emit_arr('z_0_3_f', np.zeros((0, 3), dtype=np.int32, order='F'))
+"#
+    ));
+
+    let targets = [
+        ("i8", DType::I8),
+        ("i16", DType::I16),
+        ("i32", DType::I32),
+        ("i64", DType::I64),
+        ("u8", DType::U8),
+        ("u16", DType::U16),
+        ("u32", DType::U32),
+        ("u64", DType::U64),
+    ];
+    for (src_name, dyn_src) in [
+        ("f64", DynArray::F64(f64_arr)),
+        ("f32", DynArray::F32(f32_arr)),
+    ] {
+        for (dt_name, dt) in targets {
+            let tag = format!("{src_name}_{dt_name}");
+            let cast = dyn_src.astype(dt, Casting::Unsafe).unwrap();
+            assert_dyn_matches_oracle(&cast, oracle.arr(&tag), 0.0, 0.0, false, false, &tag);
+        }
+    }
+
+    // FIX(F-B1-05): strides() parity on size-0/1 slices and empty arrays
+    let a10 = NdArray::from_vec((0..10i64).collect());
+    assert_eq!(a10.slice(&[SliceArg::from(5..6)]).unwrap().strides(), &[1]);
+    assert_eq!(a10.slice(&[SliceArg::from(0..0)]).unwrap().strides(), &[1]);
+    assert_eq!(
+        a10.reshape(&[2, 5])
+            .unwrap()
+            .slice(&[SliceArg::from(1..2), SliceArg::from(..)])
+            .unwrap()
+            .strides(),
+        &[5, 1]
+    );
+    assert_eq!(NdArray::<i32>::zeros(&[0, 3]).unwrap().strides(), &[0, 0]);
+    assert_eq!(
+        NdArray::<i32>::zeros_with_order(&[0, 3], Order::F)
+            .unwrap()
+            .strides(),
+        &[0, 0]
+    );
+
+    // FIX(F-A4-02, F-B1-07): SliceArg::from(usize > isize::MAX) must remain OOB positive, never wrap negative
+    assert!(matches!(SliceArg::from(usize::MAX), SliceArg::Index(isize::MAX)));
+    assert!(a10.slice(&[SliceArg::from(usize::MAX)]).is_err());
+
+    // FIX(F-A1-01): Order::K sorts axes by decreasing |stride| preserving ties on non-contiguous view
+    let r = NdArray::from_shape_vec(&[2, 3, 4], (0..24i32).collect()).unwrap();
+    let r_t = r.transpose(Some(&[1, 0, 2])).unwrap(); // strides [4, 12, 1]
+    assert_eq!(r_t.ravel(Order::K).shape(), &[24]);
+    let fl = r_t.flatten(Order::K);
+    assert!(!r_t.shares_storage(&fl));
+    assert_eq!(fl.to_vec(), r_t.ravel(Order::K).to_vec());
+}

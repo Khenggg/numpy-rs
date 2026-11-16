@@ -55,11 +55,12 @@ impl PadWidth {
     fn resolve(&self, ndim: usize) -> Result<Vec<(usize, usize)>> {
         if ndim == 0 {
             return match self {
-                PadWidth::Uniform(0) | PadWidth::Pair(0, 0) => Ok(Vec::new()),
-                PadWidth::Axes(v) if v.is_empty() => Ok(Vec::new()),
-                _ => Err(NumPyError::InvalidValue(
-                    "cannot pad 0-D array with non-empty pad_width".into(),
-                )),
+                PadWidth::Uniform(_) | PadWidth::Pair(_, _) => Ok(Vec::new()),
+                PadWidth::Axes(v) if v.len() <= 1 => Ok(Vec::new()),
+                PadWidth::Axes(v) => Err(NumPyError::InvalidValue(format!(
+                    "pad_width length {} does not match array ndim 0",
+                    v.len()
+                ))),
             };
         }
         match self {
@@ -383,26 +384,38 @@ pub fn reshape<T: Scalar>(arr: &NdArray<T>, newshape: &[isize]) -> Result<NdArra
     arr.reshape(newshape)
 }
 
-/// Reshapes using an explicit element read/write order (`Order::C` or `Order::F`).
+/// Reshapes using an explicit element read/write order (`Order::C`, `Order::F`, or `Order::A`).
 pub fn reshape_with_order<T: Scalar>(
     arr: &NdArray<T>,
     newshape: &[isize],
     order: Order,
 ) -> Result<NdArray<T>> {
     match order {
-        Order::F => {
-            let f_arr = arr.to_f_contiguous();
-            let dims = numpy_types::resolve_reshape_dims(f_arr.len(), newshape)?;
-            let mut rev_dims = dims.clone();
-            rev_dims.reverse();
-            let rev_i: Vec<isize> = rev_dims.iter().map(|&d| d as isize).collect();
-            let ft = f_arr.t();
-            let reshaped_t = ft.reshape(&rev_i)?;
-            let rev_axes: Vec<isize> = (0..dims.len()).rev().map(|a| a as isize).collect();
-            reshaped_t.transpose(Some(&rev_axes))
+        Order::K => Err(NumPyError::InvalidValue(
+            "order 'K' is not permitted for reshaping".into(),
+        )),
+        Order::F => reshape_f_order(arr, newshape),
+        Order::A => {
+            if arr.is_f_contiguous() && !arr.is_c_contiguous() {
+                reshape_f_order(arr, newshape)
+            } else {
+                arr.reshape(newshape)
+            }
         }
-        Order::C | Order::A | Order::K => arr.reshape(newshape),
+        Order::C => arr.reshape(newshape),
     }
+}
+
+fn reshape_f_order<T: Scalar>(arr: &NdArray<T>, newshape: &[isize]) -> Result<NdArray<T>> {
+    let f_arr = arr.to_f_contiguous();
+    let dims = numpy_types::resolve_reshape_dims(f_arr.len(), newshape)?;
+    let mut rev_dims = dims.clone();
+    rev_dims.reverse();
+    let rev_i: Vec<isize> = rev_dims.iter().map(|&d| d as isize).collect();
+    let ft = f_arr.t();
+    let reshaped_t = ft.reshape(&rev_i)?;
+    let rev_axes: Vec<isize> = (0..dims.len()).rev().map(|a| a as isize).collect();
+    reshaped_t.transpose(Some(&rev_axes))
 }
 
 /// Returns a contiguous flattened 1-D array, returning a zero-copy view whenever already C-contiguous.
@@ -412,24 +425,7 @@ pub fn ravel<T: Scalar>(arr: &NdArray<T>) -> Result<NdArray<T>> {
 
 /// `ravel` with explicit `Order`.
 pub fn ravel_with_order<T: Scalar>(arr: &NdArray<T>, order: Order) -> Result<NdArray<T>> {
-    match order {
-        Order::C => Ok(arr.ravel(Order::C)),
-        Order::F => {
-            if arr.is_f_contiguous() {
-                Ok(arr.t().ravel(Order::C))
-            } else {
-                Ok(arr.to_f_contiguous().t().ravel(Order::C))
-            }
-        }
-        Order::A => {
-            if arr.is_f_contiguous() && !arr.is_c_contiguous() {
-                Ok(arr.t().ravel(Order::C))
-            } else {
-                Ok(arr.ravel(Order::C))
-            }
-        }
-        Order::K => Ok(arr.ravel(Order::K)),
-    }
+    Ok(arr.ravel(order))
 }
 
 /// Always returns an owned flattened 1-D copy (64-byte aligned, Rayon-parallel for large arrays).
@@ -442,21 +438,11 @@ pub fn flatten_with_order<T: Scalar + Send + Sync>(
     arr: &NdArray<T>,
     order: Order,
 ) -> Result<NdArray<T>> {
-    let ordered = match order {
-        Order::F => arr.to_f_contiguous(),
-        Order::C | Order::A | Order::K => {
-            let mut uninit = AlignedBuffer::<T>::new_uninit(arr.len());
-            copy_view_to_uninit(&arr.view(), uninit.as_mut_slice());
-            let buf = unsafe { uninit.assume_init() };
-            return finish_c_array(buf, &[arr.len()]);
-        }
-    };
-    let len = ordered.len();
-    let rev_t = ordered.t();
-    let mut uninit = AlignedBuffer::<T>::new_uninit(len);
-    copy_view_to_uninit(&rev_t.view(), uninit.as_mut_slice());
+    let flat_view = arr.ravel(order);
+    let mut uninit = AlignedBuffer::<T>::new_uninit(flat_view.len());
+    copy_view_to_uninit(&flat_view.view(), uninit.as_mut_slice());
     let buf = unsafe { uninit.assume_init() };
-    finish_c_array(buf, &[len])
+    finish_c_array(buf, &[flat_view.len()])
 }
 
 /// Permutes array axes (always zero-copy view).

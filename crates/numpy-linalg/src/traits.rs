@@ -148,6 +148,11 @@ impl From<(&[isize], &[isize])> for TensordotAxes {
 }
 
 /// Typed output of `qr`.
+///
+/// For `QrMode::Raw`, reflectors `(h, tau)` follow `faer`'s Hermitian Householder convention
+/// (`H = I - tau * v * v^H` with real `tau`), which reconstructs unitary `Q` and upper-triangular
+/// `R = triu(h.T)` cleanly for both real and complex matrices (differing in diagonal phase from
+/// LAPACK's non-Hermitian complex reflector convention, `F-B2-06`).
 #[derive(Debug, Clone)]
 pub enum QrOutput<T: Scalar> {
     QR { q: NdArray<T>, r: NdArray<T> },
@@ -221,12 +226,12 @@ pub struct SlogdetResult {
     pub logabsdet: DynArray,
 }
 
-/// Typed output of `lstsq`.
+/// Typed output of `lstsq` (`rank` uses `i32` matching NumPy `np.intc`, `FIX(F-B2-04)`).
 #[derive(Debug, Clone)]
 pub struct LstsqOutput<T: LinalgScalar> {
     pub x: NdArray<T>,
     pub residuals: NdArray<T::Real>,
-    pub rank: NdArray<i64>,
+    pub rank: NdArray<i32>,
     pub s: NdArray<T::Real>,
 }
 
@@ -391,8 +396,211 @@ impl LinalgReal for f64 {
     }
 }
 
+/// Real output scalar supported by `norm` / `vector_norm` / `matrix_norm` (`f16`, `f32`, `f64`).
+pub trait NormRealScalar: Scalar + PartialEq + Copy + Send + Sync + 'static {
+    const ZERO_R: Self;
+    const POS_INF_R: Self;
+    const NAN_R: Self;
+    fn is_nan_r(self) -> bool;
+    fn add_r(self, rhs: Self) -> Self;
+    fn mul_r(self, rhs: Self) -> Self;
+    fn sqrt_r(self) -> Self;
+    fn powf_r(self, p: f64) -> Self;
+    fn gt_r(self, rhs: Self) -> bool;
+    fn lt_r(self, rhs: Self) -> bool;
+    fn from_f64_r(v: f64) -> Self;
+}
+
+impl NormRealScalar for f16 {
+    const ZERO_R: Self = f16::from_bits(0);
+    const POS_INF_R: Self = f16::INFINITY;
+    const NAN_R: Self = f16::NAN;
+    #[inline]
+    fn is_nan_r(self) -> bool {
+        self.is_nan()
+    }
+    #[inline]
+    fn add_r(self, rhs: Self) -> Self {
+        f16::from_f32(self.to_f32() + rhs.to_f32())
+    }
+    #[inline]
+    fn mul_r(self, rhs: Self) -> Self {
+        f16::from_f32(self.to_f32() * rhs.to_f32())
+    }
+    #[inline]
+    fn sqrt_r(self) -> Self {
+        f16::from_f32(self.to_f32().sqrt())
+    }
+    #[inline]
+    fn powf_r(self, p: f64) -> Self {
+        f16::from_f32(self.to_f32().powf(p as f32))
+    }
+    #[inline]
+    fn gt_r(self, rhs: Self) -> bool {
+        self.to_f32() > rhs.to_f32()
+    }
+    #[inline]
+    fn lt_r(self, rhs: Self) -> bool {
+        self.to_f32() < rhs.to_f32()
+    }
+    #[inline]
+    fn from_f64_r(v: f64) -> Self {
+        f16::from_f32(v as f32)
+    }
+}
+
+impl NormRealScalar for f32 {
+    const ZERO_R: Self = 0.0;
+    const POS_INF_R: Self = f32::INFINITY;
+    const NAN_R: Self = f32::NAN;
+    #[inline]
+    fn is_nan_r(self) -> bool {
+        self.is_nan()
+    }
+    #[inline]
+    fn add_r(self, rhs: Self) -> Self {
+        self + rhs
+    }
+    #[inline]
+    fn mul_r(self, rhs: Self) -> Self {
+        self * rhs
+    }
+    #[inline]
+    fn sqrt_r(self) -> Self {
+        self.sqrt()
+    }
+    #[inline]
+    fn powf_r(self, p: f64) -> Self {
+        self.powf(p as f32)
+    }
+    #[inline]
+    fn gt_r(self, rhs: Self) -> bool {
+        self > rhs
+    }
+    #[inline]
+    fn lt_r(self, rhs: Self) -> bool {
+        self < rhs
+    }
+    #[inline]
+    fn from_f64_r(v: f64) -> Self {
+        v as f32
+    }
+}
+
+impl NormRealScalar for f64 {
+    const ZERO_R: Self = 0.0;
+    const POS_INF_R: Self = f64::INFINITY;
+    const NAN_R: Self = f64::NAN;
+    #[inline]
+    fn is_nan_r(self) -> bool {
+        self.is_nan()
+    }
+    #[inline]
+    fn add_r(self, rhs: Self) -> Self {
+        self + rhs
+    }
+    #[inline]
+    fn mul_r(self, rhs: Self) -> Self {
+        self * rhs
+    }
+    #[inline]
+    fn sqrt_r(self) -> Self {
+        self.sqrt()
+    }
+    #[inline]
+    fn powf_r(self, p: f64) -> Self {
+        self.powf(p)
+    }
+    #[inline]
+    fn gt_r(self, rhs: Self) -> bool {
+        self > rhs
+    }
+    #[inline]
+    fn lt_r(self, rhs: Self) -> bool {
+        self < rhs
+    }
+    #[inline]
+    fn from_f64_r(v: f64) -> Self {
+        v
+    }
+}
+
+/// Element scalar supported by `norm` / `vector_norm` / `matrix_norm` (`f16`, `f32`, `f64`, `Complex32`, `Complex64`).
+pub trait NormScalar: Scalar + PartialEq + Copy + Send + Sync + 'static {
+    type NormReal: NormRealScalar;
+    const ZERO_N: Self;
+    fn is_nan_n(self) -> bool;
+    fn is_zero_n(self) -> bool;
+    fn abs_n(self) -> Self::NormReal;
+    fn supports_svd_n() -> bool;
+    fn svdvals_for_norm(moved: &NdArray<Self>) -> Result<NdArray<Self::NormReal>>;
+}
+
+impl NormScalar for f16 {
+    type NormReal = f16;
+    const ZERO_N: Self = f16::from_bits(0);
+    #[inline]
+    fn is_nan_n(self) -> bool {
+        self.is_nan()
+    }
+    #[inline]
+    fn is_zero_n(self) -> bool {
+        self.to_f32() == 0.0
+    }
+    #[inline]
+    fn abs_n(self) -> f16 {
+        f16::from_f32(self.to_f32().abs())
+    }
+    #[inline]
+    fn supports_svd_n() -> bool {
+        false
+    }
+    fn svdvals_for_norm(_moved: &NdArray<Self>) -> Result<NdArray<f16>> {
+        Err(NumPyError::DTypeError(
+            "array type float16 is unsupported in linalg".into(),
+        ))
+    }
+}
+
+macro_rules! impl_norm_scalar_linalg {
+    ($($t:ty => $r:ty),+) => {$(
+        impl NormScalar for $t {
+            type NormReal = $r;
+            const ZERO_N: Self = <$t as ProductScalar>::ZERO;
+            #[inline]
+            fn is_nan_n(self) -> bool {
+                self.is_nan_elem()
+            }
+            #[inline]
+            fn is_zero_n(self) -> bool {
+                self == <$t as ProductScalar>::ZERO
+            }
+            #[inline]
+            fn abs_n(self) -> $r {
+                self.abs_real()
+            }
+            #[inline]
+            fn supports_svd_n() -> bool {
+                true
+            }
+            fn svdvals_for_norm(moved: &NdArray<Self>) -> Result<NdArray<$r>> {
+                crate::decomp::svdvals(moved)
+            }
+        }
+    )+};
+}
+
+impl_norm_scalar_linalg!(
+    f32 => f32,
+    f64 => f64,
+    Complex32 => f32,
+    Complex64 => f64
+);
+
 /// Linear algebra scalar supported by decompositions and solvers (`f32`, `f64`, `Complex32`, `Complex64`).
-pub trait LinalgScalar: Scalar + ProductScalar + Copy + Send + Sync + 'static {
+pub trait LinalgScalar:
+    Scalar + ProductScalar + NormScalar<NormReal = <Self as LinalgScalar>::Real> + Copy + Send + Sync + 'static
+{
     type Real: LinalgReal;
     type Complex: Scalar + ProductScalar + Copy + Send + Sync + 'static;
 
@@ -1568,10 +1776,35 @@ pub fn linalg_common_dtype(dt: DType) -> DType {
     }
 }
 
+/// Strict NumPy promotion for decompositions, solvers, eigenvalues, `cond`, and `matrix_rank`:
+/// rejects `f16` with `DTypeError` (`FIX(F-B2-01)`), promoting other ints/bool to `f64`.
+#[inline]
+pub fn linalg_common_dtype_strict(dt: DType) -> Result<DType> {
+    if dt == DType::F16 {
+        Err(NumPyError::DTypeError(
+            "array type float16 is unsupported in linalg".into(),
+        ))
+    } else {
+        Ok(linalg_common_dtype(dt))
+    }
+}
+
 /// Promote a pair of dtypes for linear algebra solvers (`solve`, `tensorsolve`).
 #[inline]
 pub fn linalg_common_dtype_pair(a: DType, b: DType) -> DType {
     linalg_common_dtype(promote_types(linalg_common_dtype(a), linalg_common_dtype(b)))
+}
+
+/// Strict NumPy promotion for binary solvers, rejecting `f16` with `DTypeError` (`FIX(F-B2-01)`).
+#[inline]
+pub fn linalg_common_dtype_pair_strict(a: DType, b: DType) -> Result<DType> {
+    if a == DType::F16 || b == DType::F16 {
+        Err(NumPyError::DTypeError(
+            "array type float16 is unsupported in linalg".into(),
+        ))
+    } else {
+        Ok(linalg_common_dtype_pair(a, b))
+    }
 }
 
 /// Promote a dtype for `trace` matching NumPy (`bool`/small signed ints -> `I64`, small unsigned -> `U64`).
@@ -1584,27 +1817,29 @@ pub fn trace_default_dtype(dt: DType) -> DType {
     }
 }
 
-/// Helper macro dispatching a single `DynArray` promoted to one of the four `LinalgScalar` types (`F32`, `F64`, `C64`, `C128`).
+/// Helper macro dispatching a single `DynArray` promoted to one of the four `LinalgScalar` types (`F32`, `F64`, `C64`, `C128`),
+/// rejecting `F16` per NumPy (`FIX(F-B2-01)`).
 #[macro_export]
 macro_rules! dispatch_linalg_dyn {
     ($arr:expr, $var:ident => $body:expr) => {{
-        let target = $crate::traits::linalg_common_dtype($arr.dtype());
+        let target = $crate::traits::linalg_common_dtype_strict($arr.dtype())?;
         let promoted = $arr.astype(target, numpy_types::Casting::Unsafe)?;
         match &promoted {
             numpy_types::DynArray::F32($var) => $body,
             numpy_types::DynArray::F64($var) => $body,
             numpy_types::DynArray::C64($var) => $body,
             numpy_types::DynArray::C128($var) => $body,
-            _ => unreachable!("linalg_common_dtype only yields F32, F64, C64, C128"),
+            _ => unreachable!("linalg_common_dtype_strict only yields F32, F64, C64, C128"),
         }
     }};
 }
 
-/// Helper macro dispatching a pair of `DynArray`s promoted to a common `LinalgScalar` dtype.
+/// Helper macro dispatching a pair of `DynArray`s promoted to a common `LinalgScalar` dtype,
+/// rejecting `F16` per NumPy (`FIX(F-B2-01)`).
 #[macro_export]
 macro_rules! dispatch_linalg_pair_dyn {
     ($a:expr, $b:expr, ($va:ident, $vb:ident) => $body:expr) => {{
-        let target = $crate::traits::linalg_common_dtype_pair($a.dtype(), $b.dtype());
+        let target = $crate::traits::linalg_common_dtype_pair_strict($a.dtype(), $b.dtype())?;
         let pa = $a.astype(target, numpy_types::Casting::Unsafe)?;
         let pb = $b.astype(target, numpy_types::Casting::Unsafe)?;
         match (&pa, &pb) {

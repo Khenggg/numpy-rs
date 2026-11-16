@@ -56,3 +56,19 @@ pub fn std(a: &DynArray, axis: Option<isize>, keepdims: bool, ddof: usize) -> Re
 pub fn sort(a: &DynArray, axis: Option<isize>) -> Result<DynArray> {
     dispatch_dyn!(a, arr => Ok(DynArray::from(crate::sort(arr, axis)?)))
 }
+pub fn histogram(
+    a: &DynArray,
+    bins: crate::Bins<'_>,
+    range: Option<(f64, f64)>,
+    weights: Option<&DynArray>,
+    density: bool,
+) -> Result<crate::DynHistogram> {
+    crate::histogram_dyn(a, bins, range, weights, density)
+}
+pub fn bincount(
+    a: &numpy_types::NdArray<i64>,
+    weights: Option<&DynArray>,
+    minlength: usize,
+) -> Result<DynArray> {
+    crate::bincount_dyn(a, weights, minlength)
+}

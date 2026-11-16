@@ -116,7 +116,8 @@ impl From<isize> for SliceArg {
 impl From<usize> for SliceArg {
     #[inline]
     fn from(idx: usize) -> Self {
-        Self::Index(idx as isize)
+        // Values above isize::MAX are always out-of-bounds positive indices, never negative wraparound indices.
+        Self::Index(isize::try_from(idx).unwrap_or(isize::MAX))
     }
 }
 
@@ -239,6 +240,10 @@ pub fn shape_size(shape: &[usize]) -> Result<usize> {
 /// Compute row-major (C-order) element strides for `shape`.
 pub fn compute_c_strides(shape: &[usize]) -> Vec<isize> {
     let ndim = shape.len();
+    // FIX(F-B1-05): empty arrays use zero strides along all axes, matching NumPy.
+    if shape.iter().any(|&d| d == 0) {
+        return vec![0isize; ndim];
+    }
     let mut strides = vec![0isize; ndim];
     let mut acc = 1isize;
     for i in (0..ndim).rev() {
@@ -252,6 +257,10 @@ pub fn compute_c_strides(shape: &[usize]) -> Vec<isize> {
 /// Compute column-major (Fortran-order) element strides for `shape`.
 pub fn compute_f_strides(shape: &[usize]) -> Vec<isize> {
     let ndim = shape.len();
+    // FIX(F-B1-05): empty arrays use zero strides along all axes, matching NumPy.
+    if shape.iter().any(|&d| d == 0) {
+        return vec![0isize; ndim];
+    }
     let mut strides = vec![0isize; ndim];
     let mut acc = 1isize;
     for i in 0..ndim {

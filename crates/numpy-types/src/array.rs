@@ -44,6 +44,15 @@ impl<T> Clone for NdArray<T> {
     }
 }
 
+#[inline]
+fn checked_scaled_offset(index: usize, stride: isize) -> Result<isize> {
+    let idx_isize = isize::try_from(index)
+        .map_err(|_| NumPyError::InvalidValue("index offset exceeds isize::MAX".into()))?;
+    idx_isize
+        .checked_mul(stride)
+        .ok_or_else(|| NumPyError::InvalidValue("index offset overflow".into()))
+}
+
 impl<T> NdArray<T> {
     /// Wrap an `AlignedBuffer<T>` into an `NdArray<T>` with the requested `Order`.
     pub fn from_aligned_buffer(
@@ -548,8 +557,18 @@ impl<T> NdArray<T> {
                     if count > 0 {
                         new_offset += (first as isize) * self.strides[src_axis];
                     }
+                    // FIX(F-B1-05): preserve element stride * step on size-0/1 slices unless byte stride overflows isize (matches NumPy).
                     let new_stride = if count <= 1 {
-                        0
+                        let item_bytes = std::mem::size_of::<T>().max(1) as i128;
+                        let prod = (self.strides[src_axis] as i128) * (step as i128);
+                        if let (Some(elem_stride), Some(_byte_stride)) = (
+                            isize::try_from(prod).ok().filter(|&s| s != isize::MIN),
+                            isize::try_from(prod * item_bytes).ok(),
+                        ) {
+                            elem_stride
+                        } else {
+                            0
+                        }
                     } else {
                         self.strides[src_axis].checked_mul(step).ok_or_else(|| {
                             NumPyError::ShapeMismatch("slice stride overflow".into())
@@ -586,7 +605,14 @@ impl<T> NdArray<T> {
         let new_offset = if new_len == 0 {
             0
         } else {
-            ((self.offset as isize) + (idx as isize) * st) as usize
+            let delta = checked_scaled_offset(idx, st)?;
+            let base = isize::try_from(self.offset)
+                .map_err(|_| NumPyError::InvalidValue("array offset exceeds isize::MAX".into()))?;
+            let combined = base
+                .checked_add(delta)
+                .ok_or_else(|| NumPyError::InvalidValue("array offset overflow".into()))?;
+            usize::try_from(combined)
+                .map_err(|_| NumPyError::InvalidValue("negative array offset".into()))?
         };
         Ok(Self {
             storage: Arc::clone(&self.storage),
@@ -811,7 +837,6 @@ impl<T> NdArray<T> {
                 len: 0,
             };
         }
-        let want_f = matches!(order, Order::F);
         let can_zero_copy = match order {
             Order::C => self.is_c_contiguous(),
             Order::F => self.is_f_contiguous(),
@@ -826,10 +851,21 @@ impl<T> NdArray<T> {
                 len: self.len,
             };
         }
-        let copied = if want_f {
-            self.deep_copy(Order::F)
-        } else {
-            self.deep_copy(Order::C)
+        let copied = match order {
+            Order::F => self.deep_copy(Order::F),
+            Order::C | Order::A => self.deep_copy(Order::C),
+            Order::K => {
+                // Keep-order: traverse axes in decreasing |stride| order (matching NumPy NPY_KEEPORDER).
+                let mut perm: Vec<isize> = (0..self.ndim()).map(|i| i as isize).collect();
+                perm.sort_by(|&a, &b| {
+                    self.strides[b as usize]
+                        .unsigned_abs()
+                        .cmp(&self.strides[a as usize].unsigned_abs())
+                        .then_with(|| a.cmp(&b))
+                });
+                let reordered = self.transpose(Some(&perm)).unwrap();
+                reordered.deep_copy(Order::C)
+            }
         };
         Self {
             storage: copied.storage,
@@ -845,7 +881,17 @@ impl<T> NdArray<T> {
     where
         T: Copy,
     {
-        let mut copied = self.deep_copy(order);
+        if self.len == 0 {
+            return Self {
+                storage: Arc::new(AlignedBuffer::empty()),
+                offset: 0,
+                shape: vec![0],
+                strides: vec![1],
+                len: 0,
+            };
+        }
+        let view = self.ravel(order);
+        let mut copied = view.deep_copy(Order::C);
         copied.shape = vec![self.len];
         copied.strides = vec![1];
         copied
@@ -1019,7 +1065,8 @@ impl<'a, T> ArrayView<'a, T> {
         let ptr = if new_len == 0 {
             NonNull::dangling()
         } else {
-            unsafe { NonNull::new_unchecked(self.ptr.as_ptr().offset((idx as isize) * st)) }
+            let delta = checked_scaled_offset(idx, st)?;
+            unsafe { NonNull::new_unchecked(self.ptr.as_ptr().offset(delta)) }
         };
         Ok(Self {
             ptr,
@@ -1207,7 +1254,8 @@ impl<'a, T> ArrayViewMut<'a, T> {
             let ptr = if new_len == 0 {
                 NonNull::dangling()
             } else {
-                unsafe { NonNull::new_unchecked(base_ptr.offset((i as isize) * st)) }
+                let delta = checked_scaled_offset(i, st)?;
+                unsafe { NonNull::new_unchecked(base_ptr.offset(delta)) }
             };
             out.push(ArrayViewMut {
                 ptr,
@@ -1416,14 +1464,18 @@ fn attempt_nocopy_reshape_c(
         }
         // Verify old chunk [oi..oj) is contiguous
         for k in oi..oj - 1 {
-            if nz_strides[k] != (nz_shape[k + 1] as isize) * nz_strides[k + 1] {
+            let next_dim = isize::try_from(nz_shape[k + 1]).ok()?;
+            if next_dim.checked_mul(nz_strides[k + 1]) != Some(nz_strides[k]) {
                 return None;
             }
         }
         let mut cur_stride = nz_strides[oj - 1];
         for k in (ni..nj).rev() {
             new_strides[k] = cur_stride;
-            cur_stride *= new_shape[k].max(1) as isize;
+            if k > ni {
+                let d = isize::try_from(new_shape[k].max(1)).ok()?;
+                cur_stride = cur_stride.checked_mul(d)?;
+            }
         }
         ni = nj;
         oi = oj;

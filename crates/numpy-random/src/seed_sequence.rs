@@ -16,6 +16,10 @@ const XSHIFT: u32 = 16;
 static ENTROPY_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Flexible seed input accepted by [`SeedSequence`] and BitGenerator constructors.
+///
+/// Supports fixed-width integers (`u32`, `i32`, `u64`, `i64`, `u128`, `i128`, `usize`, `isize`),
+/// slices/vectors of `u32`/`i32`/`u64`/`i64`, and arbitrary-precision unsigned integers converted
+/// via [`SeedInput::from_big_uint_str`].
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum SeedInput {
     /// Draw unpredictable entropy from the operating system.
@@ -25,6 +29,62 @@ pub enum SeedInput {
     Words(Vec<u32>),
     /// Invalid seed input deferred as an error so constructors can remain fallible.
     Invalid(String),
+}
+
+impl SeedInput {
+    /// Parse an arbitrary-precision non-negative decimal or `0x`/`0X`-prefixed hexadecimal integer
+    /// into little-endian 32-bit entropy words matching NumPy `SeedSequence(<big_int>)` (`FIX(F-B3-07)`).
+    pub fn from_big_uint_str(s: &str) -> Result<Self> {
+        let s = s.trim();
+        if s.is_empty() {
+            return Err(NumPyError::InvalidValue("Seed integer string cannot be empty".into()));
+        }
+        let mut words: Vec<u32> = Vec::new();
+        if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+            if hex.is_empty() || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(NumPyError::InvalidValue(format!("Invalid hexadecimal seed integer: {s}")));
+            }
+            let hex = hex.trim_start_matches('0');
+            if hex.is_empty() {
+                return Ok(SeedInput::Words(vec![0]));
+            }
+            let bytes = hex.as_bytes();
+            let mut end = bytes.len();
+            while end > 0 {
+                let start = end.saturating_sub(8);
+                let chunk = std::str::from_utf8(&bytes[start..end]).expect("ascii hex");
+                let word = u32::from_str_radix(chunk, 16).map_err(|_| {
+                    NumPyError::InvalidValue(format!("Invalid hexadecimal seed integer: {s}"))
+                })?;
+                words.push(word);
+                end = start;
+            }
+        } else {
+            if !s.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(NumPyError::InvalidValue(format!("Invalid decimal seed integer: {s}")));
+            }
+            let dec = s.trim_start_matches('0');
+            if dec.is_empty() {
+                return Ok(SeedInput::Words(vec![0]));
+            }
+            words.push(0);
+            for b in dec.bytes() {
+                let mut carry = (b - b'0') as u64;
+                for w in &mut words {
+                    let prod = (*w as u64) * 10 + carry;
+                    *w = prod as u32;
+                    carry = prod >> 32;
+                }
+                if carry > 0 {
+                    words.push(carry as u32);
+                }
+            }
+        }
+        while words.len() > 1 && words.last() == Some(&0) {
+            words.pop();
+        }
+        Ok(SeedInput::Words(words))
+    }
 }
 
 fn push_u64_words(dst: &mut Vec<u32>, v: u64) {

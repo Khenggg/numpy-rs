@@ -821,3 +821,35 @@ fn test_fft_edge_cases_nan_inf_neg_zero_empty_scalar_dyn_and_large_batch() {
     assert_c128_matches(&rfft(&tiled_r, None, 0, Norm::Backward).unwrap(), "tr_rfft_ax0", &oracle, 1e-12, 1e-12, false, "tr_rfft_ax0");
     assert_f64_matches(&irfft(&tiled_c, Some(30), 0, Norm::Backward).unwrap(), "tc_irfft_ax0", &oracle, 1e-12, 1e-12, false, "tc_irfft_ax0");
 }
+
+#[test]
+fn test_p1_fft2_explicit_none_axes_matches_fftn_oracle() {
+    use numpy_fft::{fft2_with_axes, ifft2_with_axes, irfft2_with_axes, rfft2_with_axes, Fft2Axes};
+
+    let data: Vec<f64> = (0..24).map(|i| i as f64).collect();
+    let x3 = NdArray::from_shape_vec(&[2, 3, 4], data).unwrap();
+    let oracle = run_oracle(&format!(
+        "{}\n{}",
+        py_assign_f64("x3", &x3),
+        r#"
+emit_arr("fft2_default", np.fft.fft2(x3))
+emit_arr("fft2_none", np.fft.fft2(x3, axes=None))
+emit_arr("ifft2_none", np.fft.ifft2(np.fft.fft2(x3, axes=None), axes=None))
+emit_arr("rfft2_none", np.fft.rfft2(x3, axes=None))
+emit_arr("irfft2_none", np.fft.irfft2(np.fft.rfft2(x3, axes=None), s=(2, 3, 4), axes=None))
+"#,
+    ));
+
+    let f_def = fft2_with_axes(&x3, None, Fft2Axes::Default, Norm::Backward).unwrap();
+    let f_none = fft2_with_axes(&x3, None, Fft2Axes::None, Norm::Backward).unwrap();
+    let if_none = ifft2_with_axes(&f_none, None, Fft2Axes::None, Norm::Backward).unwrap();
+    let rf_none = rfft2_with_axes(&x3, None, Fft2Axes::None, Norm::Backward).unwrap();
+    let irf_none = irfft2_with_axes(&rf_none, Some(&[2, 3, 4]), Fft2Axes::None, Norm::Backward).unwrap();
+
+    assert_c128_matches(&f_def, "fft2_default", &oracle, 1e-12, 1e-12, false, "fft2_default");
+    assert_c128_matches(&f_none, "fft2_none", &oracle, 1e-12, 1e-12, false, "fft2_none");
+    assert_c128_matches(&if_none, "ifft2_none", &oracle, 1e-12, 1e-12, false, "ifft2_none");
+    assert_c128_matches(&rf_none, "rfft2_none", &oracle, 1e-12, 1e-12, false, "rfft2_none");
+    assert_f64_matches(&irf_none, "irfft2_none", &oracle, 1e-12, 1e-12, false, "irfft2_none");
+    assert_eq!(f_none.to_vec(), fftn(&x3, None, None, Norm::Backward).unwrap().to_vec());
+}

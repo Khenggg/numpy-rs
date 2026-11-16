@@ -115,7 +115,7 @@ mod avx2 {
     unsafe fn vec_max_prop_nan_f64(a: __m256d, b: __m256d) -> __m256d {
         unsafe {
             let mask = _mm256_or_pd(
-                _mm256_cmp_pd::<_CMP_GE_OQ>(a, b),
+                _mm256_cmp_pd::<_CMP_GT_OQ>(a, b),
                 _mm256_cmp_pd::<_CMP_UNORD_Q>(a, a),
             );
             _mm256_blendv_pd(b, a, mask)
@@ -126,7 +126,7 @@ mod avx2 {
     unsafe fn vec_min_prop_nan_f64(a: __m256d, b: __m256d) -> __m256d {
         unsafe {
             let mask = _mm256_or_pd(
-                _mm256_cmp_pd::<_CMP_LE_OQ>(a, b),
+                _mm256_cmp_pd::<_CMP_LT_OQ>(a, b),
                 _mm256_cmp_pd::<_CMP_UNORD_Q>(a, a),
             );
             _mm256_blendv_pd(b, a, mask)
@@ -137,7 +137,7 @@ mod avx2 {
     unsafe fn vec_fmax_f64(a: __m256d, b: __m256d) -> __m256d {
         unsafe {
             let mask = _mm256_or_pd(
-                _mm256_cmp_pd::<_CMP_GE_OQ>(a, b),
+                _mm256_cmp_pd::<_CMP_GT_OQ>(a, b),
                 _mm256_cmp_pd::<_CMP_UNORD_Q>(b, b),
             );
             _mm256_blendv_pd(b, a, mask)
@@ -148,7 +148,7 @@ mod avx2 {
     unsafe fn vec_fmin_f64(a: __m256d, b: __m256d) -> __m256d {
         unsafe {
             let mask = _mm256_or_pd(
-                _mm256_cmp_pd::<_CMP_LE_OQ>(a, b),
+                _mm256_cmp_pd::<_CMP_LT_OQ>(a, b),
                 _mm256_cmp_pd::<_CMP_UNORD_Q>(b, b),
             );
             _mm256_blendv_pd(b, a, mask)
@@ -495,7 +495,7 @@ mod avx2 {
     unsafe fn vec_max_prop_nan_f32(a: __m256, b: __m256) -> __m256 {
         unsafe {
             let mask = _mm256_or_ps(
-                _mm256_cmp_ps::<_CMP_GE_OQ>(a, b),
+                _mm256_cmp_ps::<_CMP_GT_OQ>(a, b),
                 _mm256_cmp_ps::<_CMP_UNORD_Q>(a, a),
             );
             _mm256_blendv_ps(b, a, mask)
@@ -506,7 +506,7 @@ mod avx2 {
     unsafe fn vec_min_prop_nan_f32(a: __m256, b: __m256) -> __m256 {
         unsafe {
             let mask = _mm256_or_ps(
-                _mm256_cmp_ps::<_CMP_LE_OQ>(a, b),
+                _mm256_cmp_ps::<_CMP_LT_OQ>(a, b),
                 _mm256_cmp_ps::<_CMP_UNORD_Q>(a, a),
             );
             _mm256_blendv_ps(b, a, mask)
@@ -517,7 +517,7 @@ mod avx2 {
     unsafe fn vec_fmax_f32(a: __m256, b: __m256) -> __m256 {
         unsafe {
             let mask = _mm256_or_ps(
-                _mm256_cmp_ps::<_CMP_GE_OQ>(a, b),
+                _mm256_cmp_ps::<_CMP_GT_OQ>(a, b),
                 _mm256_cmp_ps::<_CMP_UNORD_Q>(b, b),
             );
             _mm256_blendv_ps(b, a, mask)
@@ -528,7 +528,7 @@ mod avx2 {
     unsafe fn vec_fmin_f32(a: __m256, b: __m256) -> __m256 {
         unsafe {
             let mask = _mm256_or_ps(
-                _mm256_cmp_ps::<_CMP_LE_OQ>(a, b),
+                _mm256_cmp_ps::<_CMP_LT_OQ>(a, b),
                 _mm256_cmp_ps::<_CMP_UNORD_Q>(b, b),
             );
             _mm256_blendv_ps(b, a, mask)

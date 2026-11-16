@@ -907,7 +907,7 @@ fn random_state_exact_parity_with_numpy() {
         &[177, 47, 107, 202, 116, 169, 162, 63, 254, 136]
     );
 
-    let mut rs_arr = RandomState::from_seed_slice(&[1, 2, 3]);
+    let mut rs_arr = RandomState::from_seed_slice(&[1, 2, 3]).unwrap();
     assert_close(
         rs_arr.rand(&[3]).unwrap().as_slice().unwrap(),
         &[0.6098612722867289, 0.8866970434146851, 0.47633673750662764],
@@ -1188,4 +1188,28 @@ fn statistical_sanity_alignment_broadcasting_and_parallel_streams() {
         )
         .is_err());
     let _ = default_rng();
+}
+
+#[test]
+fn par_streams_are_invariant_to_thread_pool_size() {
+    // FIX(F-B3-04): par_random / par_normal outputs must be independent of rayon worker count.
+    let pool1 = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+    let pool4 = rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap();
+
+    let (r1, n1) = pool1.install(|| {
+        let mut g = default_rng_from_seed(777u64).unwrap();
+        (
+            g.par_random(&[70_000]).unwrap(),
+            g.par_normal(1.0, 2.0, &[70_000]).unwrap(),
+        )
+    });
+    let (r4, n4) = pool4.install(|| {
+        let mut g = default_rng_from_seed(777u64).unwrap();
+        (
+            g.par_random(&[70_000]).unwrap(),
+            g.par_normal(1.0, 2.0, &[70_000]).unwrap(),
+        )
+    });
+    assert_eq!(r1.to_vec(), r4.to_vec());
+    assert_eq!(n1.to_vec(), n4.to_vec());
 }

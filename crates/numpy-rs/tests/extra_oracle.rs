@@ -447,3 +447,48 @@ for fn in ['sum', 'prod', 'mean', 'var', 'std', 'min', 'max']:
     assert!(ma0.mean(Some(1), false).is_err());
     assert!(ma0.var(Some(-2), false, 0).is_err());
 }
+
+#[test]
+fn p1_timedelta_calendar_fixed_conversions_against_numpy() {
+    let cases: &[(i64, &str, TimeUnit, &str, TimeUnit)] = &[
+        (14, "M", TimeUnit::Month, "D", TimeUnit::Day),
+        (-14, "M", TimeUnit::Month, "D", TimeUnit::Day),
+        (1, "M", TimeUnit::Month, "D", TimeUnit::Day),
+        (-1, "M", TimeUnit::Month, "D", TimeUnit::Day),
+        (1, "Y", TimeUnit::Year, "D", TimeUnit::Day),
+        (-1, "Y", TimeUnit::Year, "D", TimeUnit::Day),
+        (14, "Y", TimeUnit::Year, "W", TimeUnit::Week),
+        (-14, "Y", TimeUnit::Year, "W", TimeUnit::Week),
+        (1, "M", TimeUnit::Month, "ns", TimeUnit::Nanosecond),
+        (-1, "M", TimeUnit::Month, "ns", TimeUnit::Nanosecond),
+        (30, "D", TimeUnit::Day, "M", TimeUnit::Month),
+        (-30, "D", TimeUnit::Day, "M", TimeUnit::Month),
+        (31, "D", TimeUnit::Day, "M", TimeUnit::Month),
+        (-31, "D", TimeUnit::Day, "M", TimeUnit::Month),
+        (365, "D", TimeUnit::Day, "M", TimeUnit::Month),
+        (-365, "D", TimeUnit::Day, "M", TimeUnit::Month),
+        (2_629_746, "s", TimeUnit::Second, "M", TimeUnit::Month),
+        (-2_629_745, "s", TimeUnit::Second, "M", TimeUnit::Month),
+    ];
+
+    let mut py = String::new();
+    for (i, &(val, src_name, _, dst_name, _)) in cases.iter().enumerate() {
+        py.push_str(&format!(
+            "emit_val('c{i}', np.timedelta64({val}, '{src_name}').astype('timedelta64[{dst_name}]').astype(np.int64))\n"
+        ));
+    }
+    py.push_str("emit_val('diff_md', (np.datetime64('2021-03', 'M') - np.datetime64('2020-01', 'M')).astype('timedelta64[D]').astype(np.int64))\n");
+    let oracle = run_oracle(&py);
+
+    for (i, &(val, src_name, src_u, dst_name, dst_u)) in cases.iter().enumerate() {
+        let got = TimeDelta64::new(val, src_u).cast(dst_u).unwrap().value;
+        let exp: i64 = oracle.val(&format!("c{i}")).parse().unwrap();
+        assert_eq!(got, exp, "({val}, {src_name}) -> {dst_name}");
+    }
+
+    let d1 = DateTime64::parse("2021-03", TimeUnit::Month).unwrap();
+    let d0 = DateTime64::parse("2020-01", TimeUnit::Month).unwrap();
+    let diff = d1.difference(d0, TimeUnit::Day).unwrap().value;
+    let exp_diff: i64 = oracle.val("diff_md").parse().unwrap();
+    assert_eq!(diff, exp_diff);
+}

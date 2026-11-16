@@ -353,6 +353,7 @@ fn parse_einsum(subscripts: &str, operand_shapes: &[&[usize]]) -> Result<ParsedE
             let rhs_toks = tokenize_term(rhs)?;
             let mut out = Vec::new();
             let mut seen_out: HashSet<LabelId> = HashSet::new();
+            let mut rhs_has_ellipsis = false;
             for tok in rhs_toks {
                 match tok {
                     ParsedToken::Label(lbl) => {
@@ -376,11 +377,19 @@ fn parse_einsum(subscripts: &str, operand_shapes: &[&[usize]]) -> Result<ParsedE
                                 "output cannot specify '...' when inputs contain no '...'".into(),
                             ));
                         }
+                        rhs_has_ellipsis = true;
                         for j in 0..ellipsis_len {
                             out.push(LabelId::ellipsis(j));
                         }
                     }
                 }
+            }
+            if any_ellipsis && ellipsis_len > 0 && !rhs_has_ellipsis {
+                return Err(NumPyError::InvalidValue(
+                    "output has more dimensions than subscripts given in einstein sum, \
+                     but no '...' ellipsis provided to broadcast the extra dimensions."
+                        .into(),
+                ));
             }
             out
         }

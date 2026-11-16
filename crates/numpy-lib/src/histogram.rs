@@ -1,5 +1,5 @@
 use crate::lanes::invalid;
-use numpy_types::{NdArray, Result, Scalar};
+use numpy_types::{dispatch_dyn, Complex32, Complex64, DType, DynArray, NdArray, Result, Scalar};
 
 #[derive(Clone, Copy, Debug)]
 pub enum Bins<'a> {
@@ -8,6 +8,10 @@ pub enum Bins<'a> {
 }
 pub struct Histogram {
     pub counts: NdArray<f64>,
+    pub edges: NdArray<f64>,
+}
+pub struct DynHistogram {
+    pub counts: DynArray,
     pub edges: NdArray<f64>,
 }
 
@@ -21,9 +25,10 @@ pub fn histogram_bin_edges<T: Scalar>(
     }
     match bins {
         Bins::Edges(edges) => {
-            if edges.len() < 2 || edges.windows(2).any(|w| w[0] > w[1]) {
+            // FIX(F-A3-06): allow single-edge bin arrays (0 bins), matching NumPy.
+            if edges.is_empty() || edges.windows(2).any(|w| w[0] > w[1]) {
                 return Err(invalid(
-                    "bin edges must be monotonically nondecreasing and have length >= 2",
+                    "bin edges must be monotonically nondecreasing and non-empty",
                 ));
             }
             Ok(NdArray::from_vec(edges.to_vec()))
@@ -81,7 +86,7 @@ pub fn histogram_bin_edges<T: Scalar>(
     }
 }
 fn bin_index(x: f64, edges: &[f64]) -> Option<usize> {
-    if x.is_nan() || x < edges[0] || x > edges[edges.len() - 1] {
+    if edges.len() < 2 || x.is_nan() || x < edges[0] || x > edges[edges.len() - 1] {
         return None;
     }
     let i = edges.partition_point(|&e| e <= x);
@@ -105,18 +110,21 @@ pub fn histogram<T: Scalar>(
     }
     let edges = histogram_bin_edges(a, bins, range)?;
     let e = edges.to_vec();
-    let mut counts = vec![0.0; e.len() - 1];
-    let mut w = weights.map(|w| w.iter());
-    for x in a.iter() {
-        let weight = w.as_mut().and_then(Iterator::next).unwrap_or(1.0);
-        if let Some(i) = bin_index(x.to_f64_lossy(), &e) {
-            counts[i] += weight;
+    let n_bins = e.len().saturating_sub(1);
+    let mut counts = vec![0.0; n_bins];
+    if n_bins > 0 {
+        let mut w = weights.map(|w| w.iter());
+        for x in a.iter() {
+            let weight = w.as_mut().and_then(Iterator::next).unwrap_or(1.0);
+            if let Some(i) = bin_index(x.to_f64_lossy(), &e) {
+                counts[i] += weight;
+            }
         }
-    }
-    if density {
-        let total: f64 = counts.iter().sum();
-        for (i, c) in counts.iter_mut().enumerate() {
-            *c = *c / (e[i + 1] - e[i]) / total;
+        if density {
+            let total: f64 = counts.iter().sum();
+            for (i, c) in counts.iter_mut().enumerate() {
+                *c = *c / (e[i + 1] - e[i]) / total;
+            }
         }
     }
     Ok(Histogram {
@@ -124,6 +132,182 @@ pub fn histogram<T: Scalar>(
         edges,
     })
 }
+
+/// Unweighted integer histogram matching NumPy's `int64` output dtype (`FIX(F-A3-02)`).
+pub fn histogram_counts_i64<T: Scalar>(
+    a: &NdArray<T>,
+    bins: Bins<'_>,
+    range: Option<(f64, f64)>,
+) -> Result<(NdArray<i64>, NdArray<f64>)> {
+    let edges = histogram_bin_edges(a, bins, range)?;
+    let e = edges.to_vec();
+    let n_bins = e.len().saturating_sub(1);
+    let mut counts = vec![0i64; n_bins];
+    if n_bins > 0 {
+        for x in a.iter() {
+            if let Some(i) = bin_index(x.to_f64_lossy(), &e) {
+                counts[i] += 1;
+            }
+        }
+    }
+    Ok((NdArray::from_vec(counts), edges))
+}
+
+fn dyn_histogram_weighted<T: Scalar>(
+    a: &NdArray<T>,
+    edges: NdArray<f64>,
+    w: &DynArray,
+    density: bool,
+) -> Result<DynHistogram> {
+    if w.shape() != a.shape() {
+        return Err(invalid("weights must match the input shape"));
+    }
+    if density {
+        let wf = w.astype(DType::F64, numpy_types::Casting::Unsafe)?;
+        let wf_arr = match &wf {
+            DynArray::F64(arr) => arr,
+            _ => unreachable!(),
+        };
+        let e = edges.to_vec();
+        let n_bins = e.len().saturating_sub(1);
+        let mut counts = vec![0.0; n_bins];
+        if n_bins > 0 {
+            for (x, weight) in a.iter().zip(wf_arr.iter()) {
+                if let Some(i) = bin_index(x.to_f64_lossy(), &e) {
+                    counts[i] += weight;
+                }
+            }
+            let total: f64 = counts.iter().sum();
+            for (i, c) in counts.iter_mut().enumerate() {
+                *c = *c / (e[i + 1] - e[i]) / total;
+            }
+        }
+        return Ok(DynHistogram {
+            counts: DynArray::F64(NdArray::from_vec(counts)),
+            edges,
+        });
+    }
+
+    let e = edges.to_vec();
+    let n_bins = e.len().saturating_sub(1);
+    let idx_of = |x: T| -> Option<usize> {
+        if n_bins == 0 {
+            None
+        } else {
+            bin_index(x.to_f64_lossy(), &e)
+        }
+    };
+    macro_rules! accum_int {
+        ($w_arr:expr, $ty:ty) => {{
+            let mut counts = vec![0 as $ty; n_bins];
+            for (x, wt) in a.iter().zip($w_arr.iter()) {
+                if let Some(i) = idx_of(x) {
+                    counts[i] = counts[i].wrapping_add(wt);
+                }
+            }
+            DynArray::from(NdArray::from_vec(counts))
+        }};
+    }
+    let counts = match w {
+        DynArray::Bool(w_arr) => {
+            let mut counts = vec![0i64; n_bins];
+            for (x, wt) in a.iter().zip(w_arr.iter()) {
+                if wt {
+                    if let Some(i) = idx_of(x) {
+                        counts[i] += 1;
+                    }
+                }
+            }
+            DynArray::I64(NdArray::from_vec(counts))
+        }
+        DynArray::I8(w_arr) => accum_int!(w_arr, i8),
+        DynArray::I16(w_arr) => accum_int!(w_arr, i16),
+        DynArray::I32(w_arr) => accum_int!(w_arr, i32),
+        DynArray::I64(w_arr) => accum_int!(w_arr, i64),
+        DynArray::U8(w_arr) => accum_int!(w_arr, u8),
+        DynArray::U16(w_arr) => accum_int!(w_arr, u16),
+        DynArray::U32(w_arr) => accum_int!(w_arr, u32),
+        DynArray::U64(w_arr) => accum_int!(w_arr, u64),
+        DynArray::F16(w_arr) => {
+            let mut counts = vec![0.0f32; n_bins];
+            for (x, wt) in a.iter().zip(w_arr.iter()) {
+                if let Some(i) = idx_of(x) {
+                    counts[i] += wt.to_f32();
+                }
+            }
+            DynArray::F16(NdArray::from_vec(
+                counts.into_iter().map(numpy_types::f16::from_f32).collect(),
+            ))
+        }
+        DynArray::F32(w_arr) => {
+            let mut counts = vec![0.0f32; n_bins];
+            for (x, wt) in a.iter().zip(w_arr.iter()) {
+                if let Some(i) = idx_of(x) {
+                    counts[i] += wt;
+                }
+            }
+            DynArray::F32(NdArray::from_vec(counts))
+        }
+        DynArray::F64(w_arr) => {
+            let mut counts = vec![0.0f64; n_bins];
+            for (x, wt) in a.iter().zip(w_arr.iter()) {
+                if let Some(i) = idx_of(x) {
+                    counts[i] += wt;
+                }
+            }
+            DynArray::F64(NdArray::from_vec(counts))
+        }
+        DynArray::C64(w_arr) => {
+            let mut counts = vec![Complex32::new(0.0, 0.0); n_bins];
+            for (x, wt) in a.iter().zip(w_arr.iter()) {
+                if let Some(i) = idx_of(x) {
+                    counts[i] += wt;
+                }
+            }
+            DynArray::C64(NdArray::from_vec(counts))
+        }
+        DynArray::C128(w_arr) => {
+            let mut counts = vec![Complex64::new(0.0, 0.0); n_bins];
+            for (x, wt) in a.iter().zip(w_arr.iter()) {
+                if let Some(i) = idx_of(x) {
+                    counts[i] += wt;
+                }
+            }
+            DynArray::C128(NdArray::from_vec(counts))
+        }
+    };
+    Ok(DynHistogram { counts, edges })
+}
+
+/// NumPy dtype-faithful dynamic histogram (`int64` unweighted when `!density`, weight dtype when
+/// weighted and `!density`, `float64` when `density`).
+pub fn histogram_dyn(
+    a: &DynArray,
+    bins: Bins<'_>,
+    range: Option<(f64, f64)>,
+    weights: Option<&DynArray>,
+    density: bool,
+) -> Result<DynHistogram> {
+    dispatch_dyn!(a, arr => {
+        if let Some(w) = weights {
+            let edges = histogram_bin_edges(arr, bins, range)?;
+            dyn_histogram_weighted(arr, edges, w, density)
+        } else if density {
+            let h = histogram(arr, bins, range, None, true)?;
+            Ok(DynHistogram {
+                counts: DynArray::F64(h.counts),
+                edges: h.edges,
+            })
+        } else {
+            let (counts, edges) = histogram_counts_i64(arr, bins, range)?;
+            Ok(DynHistogram {
+                counts: DynArray::I64(counts),
+                edges,
+            })
+        }
+    })
+}
+
 pub fn bincount(
     a: &NdArray<i64>,
     weights: Option<&NdArray<f64>>,
@@ -155,6 +339,52 @@ pub fn bincount(
         data[index as usize] += w.as_mut().and_then(Iterator::next).unwrap_or(1.0);
     }
     Ok(NdArray::from_vec(data))
+}
+
+/// Unweighted integer `bincount` returning `int64` (`FIX(F-A3-02)`).
+pub fn bincount_i64(a: &NdArray<i64>, minlength: usize) -> Result<NdArray<i64>> {
+    if a.ndim() != 1 || a.iter().any(|v| v < 0) {
+        return Err(invalid(
+            "bincount expects one-dimensional nonnegative integers",
+        ));
+    }
+    let len = match a.iter().max() {
+        Some(max) => usize::try_from(max)
+            .ok()
+            .and_then(|v| v.checked_add(1))
+            .ok_or_else(|| invalid("bin count overflow"))?
+            .max(minlength),
+        None => minlength,
+    };
+    let mut data = Vec::new();
+    data.try_reserve_exact(len)
+        .map_err(|_| invalid("bin count too large"))?;
+    data.resize(len, 0i64);
+    for index in a.iter() {
+        data[index as usize] += 1;
+    }
+    Ok(NdArray::from_vec(data))
+}
+
+/// NumPy dtype-faithful dynamic `bincount` (`int64` unweighted, `float64` weighted).
+pub fn bincount_dyn(
+    a: &NdArray<i64>,
+    weights: Option<&DynArray>,
+    minlength: usize,
+) -> Result<DynArray> {
+    if let Some(w) = weights {
+        if matches!(w.dtype(), DType::C64 | DType::C128) {
+            return Err(invalid("weights must be castable to float64"));
+        }
+        let wf = w.astype(DType::F64, numpy_types::Casting::Unsafe)?;
+        let wf_arr = match &wf {
+            DynArray::F64(arr) => arr,
+            _ => unreachable!(),
+        };
+        Ok(DynArray::F64(bincount(a, Some(wf_arr), minlength)?))
+    } else {
+        Ok(DynArray::I64(bincount_i64(a, minlength)?))
+    }
 }
 pub fn digitize<T: Scalar>(
     a: &NdArray<T>,

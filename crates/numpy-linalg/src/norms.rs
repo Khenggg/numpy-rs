@@ -17,7 +17,8 @@ use crate::decomp::{eigvalsh, svdvals};
 use crate::dispatch_linalg_dyn;
 use crate::solve::inv;
 use crate::traits::{
-    LinalgReal, LinalgScalar, NormOrd, ProductScalar, SlogdetOutput, SlogdetResult, Uplo,
+    LinalgReal, LinalgScalar, NormOrd, NormRealScalar, NormScalar, SlogdetOutput, SlogdetResult,
+    Uplo,
 };
 
 const NORM_RAYON_THRESHOLD: usize = 65_536;
@@ -237,6 +238,9 @@ pub fn det_dyn(a: &DynArray) -> Result<DynArray> {
 }
 
 /// Matrix numerical rank via SVD (or Hermitian EVD), matching `numpy.linalg.matrix_rank`.
+///
+/// Note: In NumPy, inputs with `ndim < 2` return a Python `int` (`int(not all(a == 0))`).
+/// In Rust's array-typed API, this returns a 0-D `NdArray<i64>` (`[]` shape) with `0` or `1` (`F-B2-07`).
 pub fn matrix_rank<T: LinalgScalar>(
     a: &NdArray<T>,
     tol: Option<f64>,
@@ -321,12 +325,12 @@ pub fn matrix_rank_dyn(
 }
 
 #[inline]
-fn eval_vector_norm_1d<T: LinalgScalar, F>(len: usize, mut get: F, ord: f64) -> Result<T::Real>
+fn eval_vector_norm_1d<T: NormScalar, F>(len: usize, mut get: F, ord: f64) -> Result<T::NormReal>
 where
     F: FnMut(usize) -> T,
 {
     if ord.is_nan() {
-        return Ok(T::Real::nan_val());
+        return Ok(T::NormReal::NAN_R);
     }
     if len == 0 {
         return if ord == f64::NEG_INFINITY {
@@ -334,208 +338,123 @@ where
                 "zero-size array to reduction operation minimum which has no identity".into(),
             ))
         } else if ord < 0.0 {
-            Ok(T::Real::pos_inf())
+            Ok(T::NormReal::POS_INF_R)
         } else {
-            Ok(T::Real::ZERO)
+            Ok(T::NormReal::ZERO_R)
         };
     }
 
     if ord == 0.0 {
         let mut cnt = 0usize;
         for i in 0..len {
-            if get(i) != T::ZERO {
+            if !get(i).is_zero_n() {
                 cnt += 1;
             }
         }
-        return Ok(T::Real::from_f64_lossy(cnt as f64));
+        return Ok(T::NormReal::from_f64_r(cnt as f64));
     }
 
     if ord == f64::INFINITY {
-        let mut mx = 0.0f64;
+        let mut mx = T::NormReal::ZERO_R;
         for i in 0..len {
             let v = get(i);
-            if v.is_nan_elem() {
-                return Ok(T::Real::nan_val());
+            if v.is_nan_n() {
+                return Ok(T::NormReal::NAN_R);
             }
-            let m = v.abs_real().to_f64_lossy();
-            if m > mx {
+            let m = v.abs_n();
+            if m.gt_r(mx) {
                 mx = m;
             }
         }
-        return Ok(T::Real::from_f64_lossy(mx));
+        return Ok(mx);
     }
 
     if ord == f64::NEG_INFINITY {
-        let mut mn = f64::INFINITY;
+        let mut mn = T::NormReal::POS_INF_R;
         for i in 0..len {
             let v = get(i);
-            if v.is_nan_elem() {
-                return Ok(T::Real::nan_val());
+            if v.is_nan_n() {
+                return Ok(T::NormReal::NAN_R);
             }
-            let m = v.abs_real().to_f64_lossy();
-            if m < mn {
+            let m = v.abs_n();
+            if m.lt_r(mn) {
                 mn = m;
             }
         }
-        return Ok(T::Real::from_f64_lossy(mn));
+        return Ok(mn);
     }
 
+    // FIX(F-B2-02): unscaled accumulation in input real dtype matches NumPy overflow/underflow semantics.
     if ord == 1.0 {
-        let mut sum = 0.0f64;
+        let mut sum = T::NormReal::ZERO_R;
         for i in 0..len {
             let v = get(i);
-            if v.is_nan_elem() {
-                return Ok(T::Real::nan_val());
+            if v.is_nan_n() {
+                return Ok(T::NormReal::NAN_R);
             }
-            sum += v.abs_real().to_f64_lossy();
+            sum = sum.add_r(v.abs_n());
         }
-        return Ok(T::Real::from_f64_lossy(sum));
+        return Ok(sum);
     }
 
     if ord == 2.0 {
-        // Scaled Euclidean norm to prevent overflow/underflow in intermediate squares.
-        let mut max_abs = 0.0f64;
-        let mut has_inf = false;
+        let mut ssq = T::NormReal::ZERO_R;
         for i in 0..len {
             let v = get(i);
-            if v.is_nan_elem() {
-                return Ok(T::Real::nan_val());
+            if v.is_nan_n() {
+                return Ok(T::NormReal::NAN_R);
             }
-            let a = v.abs_real().to_f64_lossy();
-            if a.is_infinite() {
-                has_inf = true;
-            } else if a > max_abs {
-                max_abs = a;
-            }
+            let a = v.abs_n();
+            ssq = ssq.add_r(a.mul_r(a));
         }
-        if has_inf {
-            return Ok(T::Real::pos_inf());
-        }
-        if max_abs == 0.0 {
-            return Ok(T::Real::ZERO);
-        }
-        let inv_scale = 1.0 / max_abs;
-        let mut ssq = 0.0f64;
-        for i in 0..len {
-            let scaled = get(i).abs_real().to_f64_lossy() * inv_scale;
-            ssq += scaled * scaled;
-        }
-        return Ok(T::Real::from_f64_lossy(max_abs * ssq.sqrt()));
+        return Ok(ssq.sqrt_r());
     }
 
-    // General finite nonzero real power `ord`:
-    if ord > 0.0 {
-        let mut max_abs = 0.0f64;
-        let mut has_inf = false;
-        for i in 0..len {
-            let v = get(i);
-            if v.is_nan_elem() {
-                return Ok(T::Real::nan_val());
-            }
-            let a = v.abs_real().to_f64_lossy();
-            if a.is_infinite() {
-                has_inf = true;
-            } else if a > max_abs {
-                max_abs = a;
-            }
-        }
-        if has_inf {
-            return Ok(T::Real::pos_inf());
-        }
-        if max_abs == 0.0 {
-            return Ok(T::Real::ZERO);
-        }
-        let inv_scale = 1.0 / max_abs;
-        let mut acc = 0.0f64;
-        for i in 0..len {
-            let scaled = get(i).abs_real().to_f64_lossy() * inv_scale;
-            acc += scaled.powf(ord);
-        }
-        return Ok(T::Real::from_f64_lossy(max_abs * acc.powf(1.0 / ord)));
-    }
-
-    // `ord < 0.0` (finite):
-    let mut min_abs = f64::INFINITY;
+    // General finite nonzero real power `ord`: accumulate sum(|x|^ord) then raise to 1/ord in T::NormReal.
+    let mut acc = T::NormReal::ZERO_R;
     for i in 0..len {
         let v = get(i);
-        if v.is_nan_elem() {
-            return Ok(T::Real::nan_val());
+        if v.is_nan_n() {
+            return Ok(T::NormReal::NAN_R);
         }
-        let a = v.abs_real().to_f64_lossy();
-        if a < min_abs {
-            min_abs = a;
-        }
+        acc = acc.add_r(v.abs_n().powf_r(ord));
     }
-    if min_abs == 0.0 {
-        return Ok(T::Real::ZERO);
-    }
-    if min_abs.is_infinite() {
-        return Ok(T::Real::pos_inf());
-    }
-    let mut acc = 0.0f64;
-    for i in 0..len {
-        let ratio = min_abs / get(i).abs_real().to_f64_lossy();
-        acc += ratio.powf(-ord);
-    }
-    Ok(T::Real::from_f64_lossy(min_abs * acc.powf(1.0 / ord)))
+    Ok(acc.powf_r(1.0 / ord))
 }
 
 #[inline]
-fn frobenius_norm_strided<T: LinalgScalar>(
+fn frobenius_norm_strided<T: NormScalar>(
     src_ptr: *const T,
     m: usize,
     n: usize,
     rsa: isize,
     csa: isize,
-) -> T::Real {
+) -> T::NormReal {
     if m == 0 || n == 0 {
-        return T::Real::ZERO;
+        return T::NormReal::ZERO_R;
     }
-    let mut max_abs = 0.0f64;
-    let mut has_inf = false;
+    // FIX(F-B2-02): unscaled Frobenius accumulation in input real dtype matches NumPy overflow/underflow.
+    let mut ssq = T::NormReal::ZERO_R;
     for i in 0..m {
         let row_ptr = unsafe { src_ptr.offset(i as isize * rsa) };
         for j in 0..n {
             let v = unsafe { *row_ptr.offset(j as isize * csa) };
-            if v.is_nan_elem() {
-                return T::Real::nan_val();
+            if v.is_nan_n() {
+                return T::NormReal::NAN_R;
             }
-            let a = v.abs_real().to_f64_lossy();
-            if a.is_infinite() {
-                has_inf = true;
-            } else if a > max_abs {
-                max_abs = a;
-            }
+            let a = v.abs_n();
+            ssq = ssq.add_r(a.mul_r(a));
         }
     }
-    if has_inf {
-        return T::Real::pos_inf();
-    }
-    if max_abs == 0.0 {
-        return T::Real::ZERO;
-    }
-    let inv_scale = 1.0 / max_abs;
-    let mut ssq = 0.0f64;
-    for i in 0..m {
-        let row_ptr = unsafe { src_ptr.offset(i as isize * rsa) };
-        for j in 0..n {
-            let scaled = unsafe { *row_ptr.offset(j as isize * csa) }
-                .abs_real()
-                .to_f64_lossy()
-                * inv_scale;
-            ssq += scaled * scaled;
-        }
-    }
-    T::Real::from_f64_lossy(max_abs * ssq.sqrt())
+    ssq.sqrt_r()
 }
 
-/// Vector norm matching `numpy.linalg.vector_norm`.
-pub fn vector_norm<T: LinalgScalar>(
+fn vector_norm_impl<T: NormScalar>(
     a: &NdArray<T>,
     ord: f64,
     axis: Option<&[isize]>,
     keepdims: bool,
-) -> Result<NdArray<T::Real>> {
+) -> Result<NdArray<T::NormReal>> {
     let nd = a.ndim();
     let norm_axes: Vec<usize> = match axis {
         None => (0..nd).collect(),
@@ -570,7 +489,7 @@ pub fn vector_norm<T: LinalgScalar>(
     if norm_axes.is_empty() {
         let a_c = a.to_c_contiguous();
         let src = a_c.as_slice().unwrap_or(&[]);
-        let mut out = alloc_zeroed_buf::<T::Real>(src.len());
+        let mut out = alloc_zeroed_buf::<T::NormReal>(src.len());
         for (dst, &v) in out.as_mut_slice().iter_mut().zip(src.iter()) {
             *dst = eval_vector_norm_1d(1, |_| v, ord)?;
         }
@@ -581,14 +500,14 @@ pub fn vector_norm<T: LinalgScalar>(
     if norm_axes.len() == nd {
         if let Some(sl) = a.as_slice() {
             let val = eval_vector_norm_1d(sl.len(), |i| sl[i], ord)?;
-            let mut out = alloc_zeroed_buf::<T::Real>(1);
+            let mut out = alloc_zeroed_buf::<T::NormReal>(1);
             out.as_mut_slice()[0] = val;
             return ndarray_from_aligned(out, &out_shape);
         }
         let a_c = a.to_c_contiguous();
         let sl = a_c.as_slice().unwrap_or(&[]);
         let val = eval_vector_norm_1d(sl.len(), |i| sl[i], ord)?;
-        let mut out = alloc_zeroed_buf::<T::Real>(1);
+        let mut out = alloc_zeroed_buf::<T::NormReal>(1);
         out.as_mut_slice()[0] = val;
         return ndarray_from_aligned(out, &out_shape);
     }
@@ -602,13 +521,13 @@ pub fn vector_norm<T: LinalgScalar>(
     let out_count: usize = kept.iter().map(|&d| a.shape()[d]).product();
     let vec_len: usize = norm_axes.iter().map(|&d| a.shape()[d]).product();
 
-    let mut out = alloc_zeroed_buf::<T::Real>(out_count);
+    let mut out = alloc_zeroed_buf::<T::NormReal>(out_count);
     if out_count == 0 {
         return ndarray_from_aligned(out, &out_shape);
     }
 
     if vec_len == 0 {
-        let empty_val = eval_vector_norm_1d::<T, _>(0, |_| T::ZERO, ord)?;
+        let empty_val = eval_vector_norm_1d::<T, _>(0, |_| T::ZERO_N, ord)?;
         out.as_mut_slice().fill(empty_val);
         return ndarray_from_aligned(out, &out_shape);
     }
@@ -630,23 +549,36 @@ pub fn vector_norm<T: LinalgScalar>(
     ndarray_from_aligned(out, &out_shape)
 }
 
-/// Dynamic `vector_norm`.
+/// Vector norm matching `numpy.linalg.vector_norm`.
+pub fn vector_norm<T: LinalgScalar>(
+    a: &NdArray<T>,
+    ord: f64,
+    axis: Option<&[isize]>,
+    keepdims: bool,
+) -> Result<NdArray<T::Real>> {
+    vector_norm_impl(a, ord, axis, keepdims)
+}
+
+/// Dynamic `vector_norm`. Preserves `float16`, `float32`, `float64` real output dtypes (`FIX(F-B2-05)`).
 pub fn vector_norm_dyn(
     a: &DynArray,
     ord: f64,
     axis: Option<&[isize]>,
     keepdims: bool,
 ) -> Result<DynArray> {
+    if let DynArray::F16(va) = a {
+        return Ok(DynArray::F16(vector_norm_impl(va, ord, axis, keepdims)?));
+    }
     dispatch_linalg_dyn!(a, va => Ok(LinalgReal::real_into_dyn(vector_norm(va, ord, axis, keepdims)?)))
 }
 
-fn matrix_norm_core<T: LinalgScalar>(
+fn matrix_norm_core_impl<T: NormScalar>(
     a: &NdArray<T>,
     ord: NormOrd,
     row_axis: isize,
     col_axis: isize,
     keepdims: bool,
-) -> Result<NdArray<T::Real>> {
+) -> Result<NdArray<T::NormReal>> {
     let nd = a.ndim();
     if nd < 2 {
         return Err(NumPyError::LinAlgError(format!(
@@ -696,13 +628,18 @@ fn matrix_norm_core<T: LinalgScalar>(
     let batch_shape = batch_shape_ref.to_vec();
     let bcount = batch_len(&batch_shape);
     if bcount == 0 {
+        if !T::supports_svd_n() && matches!(ord, NormOrd::Nuc | NormOrd::L2 | NormOrd::LNeg2) {
+            return Err(NumPyError::DTypeError(
+                "array type float16 is unsupported in linalg".into(),
+            ));
+        }
         return Ok(NdArray::zeros(&out_shape)?);
     }
 
     match ord {
         NormOrd::Default | NormOrd::Fro => {
             let (a_base, rsa, csa, _, bstr_a) = matrix_stack_descriptor(&moved);
-            let mut out = alloc_zeroed_buf::<T::Real>(bcount);
+            let mut out = alloc_zeroed_buf::<T::NormReal>(bcount);
             let work = m.saturating_mul(n);
             if should_par_batches(bcount, work, NORM_RAYON_THRESHOLD) {
                 out.as_mut_slice()
@@ -723,6 +660,11 @@ fn matrix_norm_core<T: LinalgScalar>(
         NormOrd::Nuc | NormOrd::L2 | NormOrd::LNeg2 => {
             let k = m.min(n);
             if k == 0 {
+                if !T::supports_svd_n() {
+                    return Err(NumPyError::DTypeError(
+                        "array type float16 is unsupported in linalg".into(),
+                    ));
+                }
                 if ord == NormOrd::LNeg2 {
                     return Err(NumPyError::InvalidValue(
                         "zero-size array to reduction operation minimum which has no identity"
@@ -731,15 +673,12 @@ fn matrix_norm_core<T: LinalgScalar>(
                 }
                 return Ok(NdArray::zeros(&out_shape)?);
             }
-            let s = svdvals(&moved)?;
+            let s = T::svdvals_for_norm(&moved)?;
             let s_slice = s.as_slice().expect("s contiguous");
-            let mut out = alloc_zeroed_buf::<T::Real>(bcount);
+            let mut out = alloc_zeroed_buf::<T::NormReal>(bcount);
             for (dst, s_b) in out.as_mut_slice().iter_mut().zip(s_slice.chunks_exact(k)) {
                 *dst = match ord {
-                    NormOrd::Nuc => {
-                        let sum: f64 = s_b.iter().map(|v| v.to_f64_lossy()).sum();
-                        T::Real::from_f64_lossy(sum)
-                    }
+                    NormOrd::Nuc => s_b.iter().copied().fold(T::NormReal::ZERO_R, |a, b| a.add_r(b)),
                     NormOrd::L2 => s_b[0],
                     NormOrd::LNeg2 => s_b[k - 1],
                     _ => unreachable!(),
@@ -753,38 +692,42 @@ fn matrix_norm_core<T: LinalgScalar>(
             }
             let is_max = ord == NormOrd::PosInf;
             let (a_base, rsa, csa, _, bstr_a) = matrix_stack_descriptor(&moved);
-            let mut out = alloc_zeroed_buf::<T::Real>(bcount);
+            let mut out = alloc_zeroed_buf::<T::NormReal>(bcount);
             for (idx, dst) in out.as_mut_slice().iter_mut().enumerate() {
                 let oa = linear_strided_offset(idx, &batch_shape, bstr_a);
                 let src_ptr = unsafe { a_base.offset(oa) };
-                let mut best = if is_max { 0.0f64 } else { f64::INFINITY };
+                let mut best = if is_max {
+                    T::NormReal::ZERO_R
+                } else {
+                    T::NormReal::POS_INF_R
+                };
                 let mut nan_seen = false;
                 for i in 0..m {
                     let row_ptr = unsafe { src_ptr.offset(i as isize * rsa) };
-                    let mut row_sum = 0.0f64;
+                    let mut row_sum = T::NormReal::ZERO_R;
                     for j in 0..n {
                         let v = unsafe { *row_ptr.offset(j as isize * csa) };
-                        if v.is_nan_elem() {
+                        if v.is_nan_n() {
                             nan_seen = true;
                             break;
                         }
-                        row_sum += v.abs_real().to_f64_lossy();
+                        row_sum = row_sum.add_r(v.abs_n());
                     }
                     if nan_seen {
                         break;
                     }
                     if is_max {
-                        if row_sum > best {
+                        if row_sum.gt_r(best) {
                             best = row_sum;
                         }
-                    } else if row_sum < best {
+                    } else if row_sum.lt_r(best) {
                         best = row_sum;
                     }
                 }
                 *dst = if nan_seen {
-                    T::Real::nan_val()
+                    T::NormReal::NAN_R
                 } else {
-                    T::Real::from_f64_lossy(best)
+                    best
                 };
             }
             ndarray_from_aligned(out, &out_shape)
@@ -795,38 +738,42 @@ fn matrix_norm_core<T: LinalgScalar>(
             }
             let is_max = ord == NormOrd::L1;
             let (a_base, rsa, csa, _, bstr_a) = matrix_stack_descriptor(&moved);
-            let mut out = alloc_zeroed_buf::<T::Real>(bcount);
+            let mut out = alloc_zeroed_buf::<T::NormReal>(bcount);
             for (idx, dst) in out.as_mut_slice().iter_mut().enumerate() {
                 let oa = linear_strided_offset(idx, &batch_shape, bstr_a);
                 let src_ptr = unsafe { a_base.offset(oa) };
-                let mut best = if is_max { 0.0f64 } else { f64::INFINITY };
+                let mut best = if is_max {
+                    T::NormReal::ZERO_R
+                } else {
+                    T::NormReal::POS_INF_R
+                };
                 let mut nan_seen = false;
                 for j in 0..n {
                     let col_ptr = unsafe { src_ptr.offset(j as isize * csa) };
-                    let mut col_sum = 0.0f64;
+                    let mut col_sum = T::NormReal::ZERO_R;
                     for i in 0..m {
                         let v = unsafe { *col_ptr.offset(i as isize * rsa) };
-                        if v.is_nan_elem() {
+                        if v.is_nan_n() {
                             nan_seen = true;
                             break;
                         }
-                        col_sum += v.abs_real().to_f64_lossy();
+                        col_sum = col_sum.add_r(v.abs_n());
                     }
                     if nan_seen {
                         break;
                     }
                     if is_max {
-                        if col_sum > best {
+                        if col_sum.gt_r(best) {
                             best = col_sum;
                         }
-                    } else if col_sum < best {
+                    } else if col_sum.lt_r(best) {
                         best = col_sum;
                     }
                 }
                 *dst = if nan_seen {
-                    T::Real::nan_val()
+                    T::NormReal::NAN_R
                 } else {
-                    T::Real::from_f64_lossy(best)
+                    best
                 };
             }
             ndarray_from_aligned(out, &out_shape)
@@ -835,6 +782,16 @@ fn matrix_norm_core<T: LinalgScalar>(
             "Invalid norm order for matrices".into(),
         )),
     }
+}
+
+fn matrix_norm_core<T: LinalgScalar>(
+    a: &NdArray<T>,
+    ord: NormOrd,
+    row_axis: isize,
+    col_axis: isize,
+    keepdims: bool,
+) -> Result<NdArray<T::Real>> {
+    matrix_norm_core_impl(a, ord, row_axis, col_axis, keepdims)
 }
 
 /// Matrix norm over last two axes `(-2, -1)`, matching `numpy.linalg.matrix_norm`.
@@ -846,18 +803,20 @@ pub fn matrix_norm<T: LinalgScalar>(
     matrix_norm_core(a, ord, -2, -1, keepdims)
 }
 
-/// Dynamic `matrix_norm`.
+/// Dynamic `matrix_norm`. Preserves `float16` for Frobenius/1/-1/inf/-inf and rejects `nuc`/2/-2 (`FIX(F-B2-05)`).
 pub fn matrix_norm_dyn(a: &DynArray, ord: NormOrd, keepdims: bool) -> Result<DynArray> {
+    if let DynArray::F16(va) = a {
+        return Ok(DynArray::F16(matrix_norm_core_impl(va, ord, -2, -1, keepdims)?));
+    }
     dispatch_linalg_dyn!(a, va => Ok(LinalgReal::real_into_dyn(matrix_norm(va, ord, keepdims)?)))
 }
 
-/// General matrix or vector norm matching `numpy.linalg.norm`.
-pub fn norm<T: LinalgScalar>(
+fn norm_impl<T: NormScalar>(
     a: &NdArray<T>,
     ord: NormOrd,
     axis: Option<&[isize]>,
     keepdims: bool,
-) -> Result<NdArray<T::Real>> {
+) -> Result<NdArray<T::NormReal>> {
     let vec_ord_to_f64 = |o: NormOrd| -> Result<f64> {
         match o {
             NormOrd::Default | NormOrd::L2 => Ok(2.0),
@@ -878,11 +837,11 @@ pub fn norm<T: LinalgScalar>(
         None => {
             if a.ndim() == 1 {
                 let p = vec_ord_to_f64(ord)?;
-                vector_norm(a, p, Some(&[0]), keepdims)
+                vector_norm_impl(a, p, Some(&[0]), keepdims)
             } else if a.ndim() == 2 {
-                matrix_norm_core(a, ord, 0, 1, keepdims)
+                matrix_norm_core_impl(a, ord, 0, 1, keepdims)
             } else if ord == NormOrd::Default {
-                vector_norm(a, 2.0, None, keepdims)
+                vector_norm_impl(a, 2.0, None, keepdims)
             } else {
                 Err(NumPyError::InvalidValue(
                     "Improper number of dimensions to norm".into(),
@@ -892,9 +851,9 @@ pub fn norm<T: LinalgScalar>(
         Some(axes) => match axes.len() {
             1 => {
                 let p = vec_ord_to_f64(ord)?;
-                vector_norm(a, p, Some(axes), keepdims)
+                vector_norm_impl(a, p, Some(axes), keepdims)
             }
-            2 => matrix_norm_core(a, ord, axes[0], axes[1], keepdims),
+            2 => matrix_norm_core_impl(a, ord, axes[0], axes[1], keepdims),
             _ => Err(NumPyError::InvalidValue(
                 "Improper number of dimensions to norm".into(),
             )),
@@ -902,13 +861,26 @@ pub fn norm<T: LinalgScalar>(
     }
 }
 
-/// Dynamic `norm`.
+/// General matrix or vector norm matching `numpy.linalg.norm`.
+pub fn norm<T: LinalgScalar>(
+    a: &NdArray<T>,
+    ord: NormOrd,
+    axis: Option<&[isize]>,
+    keepdims: bool,
+) -> Result<NdArray<T::Real>> {
+    norm_impl(a, ord, axis, keepdims)
+}
+
+/// Dynamic `norm`. Preserves `float16` output dtype matching NumPy (`FIX(F-B2-05)`).
 pub fn norm_dyn(
     a: &DynArray,
     ord: NormOrd,
     axis: Option<&[isize]>,
     keepdims: bool,
 ) -> Result<DynArray> {
+    if let DynArray::F16(va) = a {
+        return Ok(DynArray::F16(norm_impl(va, ord, axis, keepdims)?));
+    }
     dispatch_linalg_dyn!(a, va => Ok(LinalgReal::real_into_dyn(norm(va, ord, axis, keepdims)?)))
 }
 

@@ -262,11 +262,11 @@ impl DynArray {
             DType::Bool => Self::Bool(cast_to_bool(self)),
             DType::I8 => Self::I8(cast_to_i64(self).map(|v| v as i8)),
             DType::I16 => Self::I16(cast_to_i64(self).map(|v| v as i16)),
-            DType::I32 => Self::I32(cast_to_i64(self).map(|v| v as i32)),
+            DType::I32 => Self::I32(cast_to_i32(self)),
             DType::I64 => Self::I64(cast_to_i64(self)),
-            DType::U8 => Self::U8(cast_to_u64(self).map(|v| v as u8)),
-            DType::U16 => Self::U16(cast_to_u64(self).map(|v| v as u16)),
-            DType::U32 => Self::U32(cast_to_u64(self).map(|v| v as u32)),
+            DType::U8 => Self::U8(cast_to_narrow_uint(self, |v| v as u8)),
+            DType::U16 => Self::U16(cast_to_narrow_uint(self, |v| v as u16)),
+            DType::U32 => Self::U32(cast_to_narrow_uint(self, |v| v as u32)),
             DType::U64 => Self::U64(cast_to_u64(self)),
             DType::F16 => Self::F16(cast_to_typed(self, f16::from_f64_lossy)),
             DType::F32 => Self::F32(cast_to_typed(self, f32::from_f64_lossy)),
@@ -352,6 +352,38 @@ fn cast_to_typed<U: Scalar>(src: &DynArray, mut conv: impl FnMut(f64) -> U) -> N
     }
 }
 
+#[inline]
+fn f64_to_numpy_i64(x: f64) -> i64 {
+    if x.is_finite() && (-9223372036854775808.0..9223372036854775808.0).contains(&x) {
+        x.trunc() as i64
+    } else {
+        i64::MIN
+    }
+}
+
+#[inline]
+fn f64_to_numpy_i32(x: f64) -> i32 {
+    let t = x.trunc();
+    if t.is_finite() && (-2147483648.0..2147483648.0).contains(&t) {
+        t as i32
+    } else {
+        i32::MIN
+    }
+}
+
+#[inline]
+fn f64_to_numpy_u64(x: f64) -> u64 {
+    if !x.is_finite() {
+        1u64 << 63
+    } else if (0.0..18446744073709551616.0).contains(&x) {
+        x.trunc() as u64
+    } else if (-9223372036854775808.0..0.0).contains(&x) {
+        (x.trunc() as i64) as u64
+    } else {
+        1u64 << 63
+    }
+}
+
 fn cast_to_i64(src: &DynArray) -> NdArray<i64> {
     match src {
         DynArray::Bool(a) => a.map(|x| i64::from(x)),
@@ -363,11 +395,49 @@ fn cast_to_i64(src: &DynArray) -> NdArray<i64> {
         DynArray::U16(a) => a.map(|x| x as i64),
         DynArray::U32(a) => a.map(|x| x as i64),
         DynArray::U64(a) => a.map(|x| x as i64),
-        DynArray::F16(a) => a.map(|x| x.to_f64() as i64),
-        DynArray::F32(a) => a.map(|x| x as i64),
-        DynArray::F64(a) => a.map(|x| x as i64),
-        DynArray::C64(a) => a.map(|x| x.re as i64),
-        DynArray::C128(a) => a.map(|x| x.re as i64),
+        DynArray::F16(a) => a.map(|x| f64_to_numpy_i64(x.to_f64())),
+        DynArray::F32(a) => a.map(|x| f64_to_numpy_i64(x as f64)),
+        DynArray::F64(a) => a.map(f64_to_numpy_i64),
+        DynArray::C64(a) => a.map(|x| f64_to_numpy_i64(x.re as f64)),
+        DynArray::C128(a) => a.map(|x| f64_to_numpy_i64(x.re)),
+    }
+}
+
+fn cast_to_i32(src: &DynArray) -> NdArray<i32> {
+    match src {
+        DynArray::Bool(a) => a.map(|x| i32::from(x)),
+        DynArray::I8(a) => a.map(|x| x as i32),
+        DynArray::I16(a) => a.map(|x| x as i32),
+        DynArray::I32(a) => a.clone(),
+        DynArray::I64(a) => a.map(|x| x as i32),
+        DynArray::U8(a) => a.map(|x| x as i32),
+        DynArray::U16(a) => a.map(|x| x as i32),
+        DynArray::U32(a) => a.map(|x| x as i32),
+        DynArray::U64(a) => a.map(|x| x as i32),
+        DynArray::F16(a) => a.map(|x| f64_to_numpy_i32(x.to_f64())),
+        DynArray::F32(a) => a.map(|x| f64_to_numpy_i32(x as f64)),
+        DynArray::F64(a) => a.map(f64_to_numpy_i32),
+        DynArray::C64(a) => a.map(|x| f64_to_numpy_i32(x.re as f64)),
+        DynArray::C128(a) => a.map(|x| f64_to_numpy_i32(x.re)),
+    }
+}
+
+fn cast_to_narrow_uint<U: Scalar>(src: &DynArray, mut conv: impl FnMut(u64) -> U) -> NdArray<U> {
+    match src {
+        DynArray::Bool(a) => a.map(|x| conv(u64::from(x))),
+        DynArray::I8(a) => a.map(|x| conv(x as u64)),
+        DynArray::I16(a) => a.map(|x| conv(x as u64)),
+        DynArray::I32(a) => a.map(|x| conv(x as u64)),
+        DynArray::I64(a) => a.map(|x| conv(x as u64)),
+        DynArray::U8(a) => a.map(|x| conv(x as u64)),
+        DynArray::U16(a) => a.map(|x| conv(x as u64)),
+        DynArray::U32(a) => a.map(|x| conv(x as u64)),
+        DynArray::U64(a) => a.map(|x| conv(x)),
+        DynArray::F16(a) => a.map(|x| conv(f64_to_numpy_i64(x.to_f64()) as u64)),
+        DynArray::F32(a) => a.map(|x| conv(f64_to_numpy_i64(x as f64) as u64)),
+        DynArray::F64(a) => a.map(|x| conv(f64_to_numpy_i64(x) as u64)),
+        DynArray::C64(a) => a.map(|x| conv(f64_to_numpy_i64(x.re as f64) as u64)),
+        DynArray::C128(a) => a.map(|x| conv(f64_to_numpy_i64(x.re) as u64)),
     }
 }
 
@@ -382,11 +452,11 @@ fn cast_to_u64(src: &DynArray) -> NdArray<u64> {
         DynArray::U16(a) => a.map(|x| x as u64),
         DynArray::U32(a) => a.map(|x| x as u64),
         DynArray::U64(a) => a.clone(),
-        DynArray::F16(a) => a.map(|x| x.to_f64() as u64),
-        DynArray::F32(a) => a.map(|x| x as u64),
-        DynArray::F64(a) => a.map(|x| x as u64),
-        DynArray::C64(a) => a.map(|x| x.re as u64),
-        DynArray::C128(a) => a.map(|x| x.re as u64),
+        DynArray::F16(a) => a.map(|x| f64_to_numpy_u64(x.to_f64())),
+        DynArray::F32(a) => a.map(|x| f64_to_numpy_u64(x as f64)),
+        DynArray::F64(a) => a.map(f64_to_numpy_u64),
+        DynArray::C64(a) => a.map(|x| f64_to_numpy_u64(x.re as f64)),
+        DynArray::C128(a) => a.map(|x| f64_to_numpy_u64(x.re)),
     }
 }
 

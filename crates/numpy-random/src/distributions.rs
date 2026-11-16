@@ -466,7 +466,8 @@ fn standard_normal_unlikely_f32<B: BitGenerator>(
                 let xx = -ZIGGURAT_NOR_INV_R_F32 * (-rng.next_float()).ln_1p();
                 let yy = -(-rng.next_float()).ln_1p();
                 if yy + yy > xx * xx {
-                    return if ((r >> 8) & 1) != 0 {
+                    // Use bit 17 ((rabs >> 8) & 1), matching NumPy distributions.c random_standard_normal_f.
+                    return if ((r >> 17) & 1) != 0 {
                         -(ZIGGURAT_NOR_R_F32 + xx)
                     } else {
                         ZIGGURAT_NOR_R_F32 + xx
@@ -1679,7 +1680,12 @@ pub(crate) fn legacy_logseries<B: BitGenerator>(rng: &mut B, p: f64) -> i64 {
         let u = legacy_double(rng);
         let q = 1.0 - (r * u).exp();
         if v <= q * q {
-            return (1.0 + v.ln() / q.ln()).floor() as i64;
+            // FIX(F-B3-06): guard against v == 0.0 / integer saturation matching NumPy legacy_random_logseries.
+            let result = (1.0 + v.ln() / q.ln()).floor() as i64;
+            if result < 1 || v == 0.0 {
+                continue;
+            }
+            return result;
         }
         if v >= q {
             return 1;

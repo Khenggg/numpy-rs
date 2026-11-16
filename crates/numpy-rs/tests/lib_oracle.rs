@@ -973,3 +973,99 @@ emit_arr('nq_ne_empty_ax0', np.nanquantile(ne, [], axis=0))
     );
     assert!(lib::nanquantile(&empty03, &[1.5], Some(0), false, lib::QuantileMethod::Linear).is_err());
 }
+
+#[test]
+fn p1_numpy_lib_npy_native_descr_savetxt_polynomial_and_histogram_dtypes() {
+    use std::io::Cursor;
+
+    // FIX(F-A3-03): native NPY descr 'i4', 'f8' without endian marker
+    let header = "{'descr': 'i4', 'fortran_order': False, 'shape': (2,), }\n";
+    let pad = 64 - ((10 + header.len()) % 64);
+    let mut raw = b"\x93NUMPY\x01\x00".to_vec();
+    raw.extend_from_slice(&((header.len() + pad) as u16).to_le_bytes());
+    raw.extend_from_slice(header.as_bytes());
+    raw.resize(raw.len() + pad - 1, b' ');
+    raw.push(b'\n');
+    raw.extend_from_slice(&16843009i32.to_le_bytes());
+    raw.extend_from_slice(&16843009i32.to_le_bytes());
+    let decoded = lib::read_npy(&mut Cursor::new(&raw)).unwrap();
+    assert_eq!(decoded.dtype(), DType::I32);
+    if let DynArray::I32(arr) = decoded {
+        assert_eq!(arr.to_vec(), vec![16843009, 16843009]);
+    } else {
+        panic!("expected I32");
+    }
+
+    // FIX(F-A3-08): savetxt uses %.18e and lowercase nan/inf/-inf matching np.savetxt
+    let tmp = std::env::temp_dir().join("numpy_rs_savetxt_p1.txt");
+    let mat = NdArray::from_shape_vec(&[2, 2], vec![1.0, 2.5, f64::NAN, f64::NEG_INFINITY]).unwrap();
+    lib::savetxt(&tmp, &mat, " ").unwrap();
+    let txt = std::fs::read_to_string(&tmp).unwrap().replace("\r\n", "\n");
+    let _ = std::fs::remove_file(&tmp);
+
+    let oracle = run_oracle(
+        r#"
+import io
+b = io.StringIO()
+np.savetxt(b, np.array([[1.0, 2.5], [np.nan, -np.inf]]))
+emit_val("savetxt_hex", b.getvalue().encode("utf-8").hex())
+q1, r1 = np.polydiv([0., 0., 1.], [1., 2.])
+emit_arr("pd_q1", q1)
+emit_arr("pd_r1", r1)
+q2, r2 = np.polydiv([1., 2.], [0., 1.])
+emit_arr("pd_q2", q2)
+emit_arr("pd_r2", r2)
+emit_arr("pi_extra", np.polyint([1., 2., 3.], m=2, k=[1., 2., 3.]))
+emit_arr("pm_empty", np.polymul([], [1., 2.]))
+emit_arr("pm_both_empty", np.polymul([], []))
+hc0, he0 = np.histogram([1.0], bins=[0.0])
+emit_arr("h_single_c", hc0)
+emit_arr("h_single_e", he0)
+hc_i, _ = np.histogram(np.array([1.0, 2.0, 2.0]), bins=2)
+emit_arr("h_i64", hc_i)
+hc_f32, _ = np.histogram(np.array([1.0, 2.0, 2.0]), bins=2, weights=np.array([1.0, 2.0, 3.0], dtype=np.float32))
+emit_arr("h_w_f32", hc_f32)
+bc_i = np.bincount(np.array([0, 1, 1], dtype=np.int64))
+emit_arr("bc_i64", bc_i)
+bc_w = np.bincount(np.array([0, 1, 1], dtype=np.int64), weights=np.array([1, 2, 3], dtype=np.int32))
+emit_arr("bc_w_f64", bc_w)
+"#,
+    );
+    let got_hex: String = txt.as_bytes().iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(got_hex, oracle.val("savetxt_hex"));
+
+    // FIX(F-A3-04/05/09): polynomial parity
+    let (q1, r1) = lib::polydiv(&[0., 0., 1.], &[1., 2.]).unwrap();
+    assert_dyn_matches_oracle(&NdArray::from_vec(q1).into(), oracle.arr("pd_q1"), 0., 0., false, false, "pd_q1");
+    assert_dyn_matches_oracle(&NdArray::from_vec(r1).into(), oracle.arr("pd_r1"), 0., 0., false, false, "pd_r1");
+    let (q2, r2) = lib::polydiv(&[1., 2.], &[0., 1.]).unwrap();
+    assert_dyn_matches_oracle(&NdArray::from_vec(q2).into(), oracle.arr("pd_q2"), 0., 0., true, false, "pd_q2");
+    assert_dyn_matches_oracle(&NdArray::from_vec(r2).into(), oracle.arr("pd_r2"), 0., 0., true, false, "pd_r2");
+
+    let pi = lib::polyint(&[1., 2., 3.], 2, &[1., 2., 3.]).unwrap();
+    assert_dyn_matches_oracle(&NdArray::from_vec(pi).into(), oracle.arr("pi_extra"), 1e-12, 1e-12, false, false, "pi_extra");
+    assert!(lib::polyint_with_constants(&[1., 2.], 1, Some(&[])).is_err());
+
+    let pm1 = lib::polymul(&[], &[1., 2.]);
+    assert_dyn_matches_oracle(&NdArray::from_vec(pm1).into(), oracle.arr("pm_empty"), 0., 0., false, false, "pm_empty");
+    let pm0 = lib::polymul(&[], &[]);
+    assert_dyn_matches_oracle(&NdArray::from_vec(pm0).into(), oracle.arr("pm_both_empty"), 0., 0., false, false, "pm_both_empty");
+
+    // FIX(F-A3-02/06): histogram_dyn & bincount_dyn dtypes + single-edge bins
+    let a1 = DynArray::F64(NdArray::from_vec(vec![1.0]));
+    let hs = lib::histogram_dyn(&a1, lib::Bins::Edges(&[0.0]), None, None, false).unwrap();
+    assert_dyn_matches_oracle(&hs.counts, oracle.arr("h_single_c"), 0., 0., false, false, "h_single_c");
+    assert_dyn_matches_oracle(&hs.edges.into(), oracle.arr("h_single_e"), 0., 0., false, false, "h_single_e");
+
+    let a3 = DynArray::F64(NdArray::from_vec(vec![1.0, 2.0, 2.0]));
+    let hi = lib::histogram_dyn(&a3, lib::Bins::Count(2), None, None, false).unwrap();
+    assert_dyn_matches_oracle(&hi.counts, oracle.arr("h_i64"), 0., 0., false, false, "h_i64");
+    let w_f32 = DynArray::F32(NdArray::from_vec(vec![1.0, 2.0, 3.0]));
+    let hw = lib::histogram_dyn(&a3, lib::Bins::Count(2), None, Some(&w_f32), false).unwrap();
+    assert_dyn_matches_oracle(&hw.counts, oracle.arr("h_w_f32"), 1e-6, 1e-6, false, false, "h_w_f32");
+
+    let bi = NdArray::from_vec(vec![0i64, 1, 1]);
+    assert_dyn_matches_oracle(&lib::bincount_dyn(&bi, None, 0).unwrap(), oracle.arr("bc_i64"), 0., 0., false, false, "bc_i64");
+    let bw = DynArray::I32(NdArray::from_vec(vec![1i32, 2, 3]));
+    assert_dyn_matches_oracle(&lib::bincount_dyn(&bi, Some(&bw), 0).unwrap(), oracle.arr("bc_w_f64"), 0., 0., false, false, "bc_w_f64");
+}

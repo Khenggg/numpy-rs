@@ -470,15 +470,7 @@ pub fn svd<T: LinalgScalar>(
         });
     }
 
-    // Check finite upfront (matches NumPy GH-32591 / umath_linalg).
-    let (a_base, rsa, csa, _, bstr_a) = matrix_stack_descriptor(a);
-    for idx in 0..bcount {
-        let oa = linear_strided_offset(idx, &batch_shape, bstr_a);
-        if !unsafe { mat_all_finite(a_base.offset(oa), m, n, rsa, csa) } {
-            return Err(NumPyError::LinAlgError("SVD did not converge".into()));
-        }
-    }
-
+    // FIX(F-B2-03): Hermitian SVD routes through `eigh`/`eigvalsh` in NumPy, which succeeds on NaN/Inf.
     if hermitian {
         if !compute_uv {
             let evals = eigvalsh(a, Uplo::Lower)?;
@@ -548,6 +540,15 @@ pub fn svd<T: LinalgScalar>(
             s: ndarray_from_aligned(s_buf, &s_shape)?,
             vh: Some(ndarray_from_aligned(vh_buf, &vh_shape)?),
         });
+    }
+
+    // Check finite upfront (matches NumPy GH-32591 / umath_linalg) for non-Hermitian SVD.
+    let (a_base, rsa, csa, _, bstr_a) = matrix_stack_descriptor(a);
+    for idx in 0..bcount {
+        let oa = linear_strided_offset(idx, &batch_shape, bstr_a);
+        if !unsafe { mat_all_finite(a_base.offset(oa), m, n, rsa, csa) } {
+            return Err(NumPyError::LinAlgError("SVD did not converge".into()));
+        }
     }
 
     let comp_u = if !compute_uv {

@@ -511,7 +511,7 @@ pub fn lstsq<T: LinalgScalar>(
     if m == 0 || n == 0 || k == 0 {
         let x = NdArray::zeros(&x_shape)?;
         let s = NdArray::zeros(&[min_mn])?;
-        let rank = NdArray::from_scalar(0i64);
+        let rank = NdArray::from_scalar(0i32);
         let residuals = if m > n && n == 0 && k > 0 {
             // rank == n == 0 and m > n: residual is ||B[:, col]||_2^2.
             let res_len = if b_is_1d { 1 } else { k };
@@ -553,7 +553,7 @@ pub fn lstsq<T: LinalgScalar>(
 
     let smax = s_data[0].to_f64_lossy();
     let cutoff = rcond_eff * smax;
-    let mut rank_val: i64 = 0;
+    let mut rank_val: i32 = 0;
     for &sv in s_data {
         if sv.to_f64_lossy() > cutoff {
             rank_val += 1;
@@ -670,7 +670,7 @@ pub fn lstsq_dyn(a: &DynArray, b: &DynArray, rcond: Option<f64>) -> Result<Lstsq
         Ok(LstsqResult {
             x: LinalgScalar::into_dyn(out.x),
             residuals: LinalgReal::real_into_dyn(out.residuals),
-            rank: DynArray::I64(out.rank),
+            rank: DynArray::I32(out.rank),
             s: LinalgReal::real_into_dyn(out.s),
         })
     })
@@ -686,7 +686,8 @@ pub fn matrix_power<T: ProductScalar>(a: &NdArray<T>, n: i64) -> Result<NdArray<
     }
 }
 
-/// Dynamic `matrix_power`. For `n < 0`, integers/bool/`f16` auto-promote to `f64` matching NumPy.
+/// Dynamic `matrix_power`. For `n >= 0`, integers/bool/`f16` preserve dtype; for `n < 0`,
+/// `f16` returns `DTypeError` matching NumPy (`FIX(F-B2-01)`).
 pub fn matrix_power_dyn(a: &DynArray, n: i64) -> Result<DynArray> {
     if n >= 0 {
         dispatch_product_dyn!(a, va => Ok(ProductScalar::product_into_dyn(matrix_power_nonneg(va, n as u64)?)))

@@ -616,7 +616,7 @@ emit_arr("rs_key_raw", rs_key.random_sample(5))
     rs().shuffle(&mut sa).unwrap();
     check_i64_arr(&sa, &oracle, "rs_shuffle");
 
-    let mut rs_key = RandomState::from_seed_slice(&[1, 2, 3, 4]);
+    let mut rs_key = RandomState::from_seed_slice(&[1, 2, 3, 4]).unwrap();
     check_f64_arr(&rs_key.random_sample(&[5]).unwrap(), &oracle, "rs_key_raw", 1e-15);
 
     // State roundtrip including Box-Muller cached second normal (has_gauss=true after 1 draw)
@@ -897,4 +897,77 @@ emit_arr("rs_mvn_nan", np.random.RandomState(1).multivariate_normal([np.nan, 0.0
     assert_f64_close(&g_mvn.to_vec(), &oracle.arr("g_mvn_nan").to_f64_vec(), 1e-12, 1e-12, true, "g_mvn_nan");
     let rs_mvn = RandomState::from_seed(1).multivariate_normal(&[f64::NAN, 0.0], &eye2, None).unwrap();
     assert_f64_close(&rs_mvn.to_vec(), &oracle.arr("rs_mvn_nan").to_f64_vec(), 1e-12, 1e-12, true, "rs_mvn_nan");
+}
+
+#[test]
+fn test_p0_p1_f32_normal_neg_zero_empty_seed_fill_bytes_and_bigint() {
+    use numpy_random::SeedInput;
+
+    let oracle = run_oracle(
+        r#"
+g = np.random.Generator(np.random.PCG64(12345))
+n32 = g.standard_normal(200001, dtype=np.float32)
+emit_arr("n32_tail", n32)
+emit_val("n32_3420", f"{float(n32[3420]):.16g}")
+
+mt_b = np.random.Generator(np.random.MT19937(1)).bytes(7)
+emit_val("mt_bytes7", mt_b.hex())
+
+ss_big = np.random.SeedSequence(1234567890123456789012345678901234567890)
+emit_arr("ss_big_st", ss_big.generate_state(4))
+
+g0 = np.random.default_rng(0)
+emit_arr("g_pois_nz", g0.poisson(-0.0, 3))
+emit_arr("g_bin_nz", g0.binomial(5, -0.0, 3))
+rs0 = np.random.RandomState(0)
+emit_arr("rs_pois_nz", rs0.poisson(-0.0, 3).astype(np.int64))
+emit_arr("rs_bin_nz", rs0.binomial(5, -0.0, 3).astype(np.int64))
+emit_arr("rs_uni_nz", rs0.uniform(0.0, -0.0, 3))
+"#,
+    );
+
+    // FIX(F-B3-01): 200,001 f32 standard normals match NumPy bit-for-bit, including tail index 3420
+    let mut g = Generator::new(PCG64::from_seed(12345u64).unwrap());
+    let n32 = g.standard_normal_f32(&[200_001]).unwrap();
+    check_f32_arr(&n32, &oracle, "n32_tail", 0.0);
+    let idx3420 = n32.to_vec()[3420];
+    assert!(idx3420 < 0.0, "expected negative draw at index 3420, got {idx3420}");
+
+    // FIX(F-B3-02): reject -0.0 on normal/gamma/standard_gamma/rayleigh/weibull/uniform/vonmises, accept on poisson/binomial
+    let mut g0 = default_rng_from_seed(0).unwrap();
+    assert!(g0.normal(0.0, -0.0, &[3]).is_err());
+    assert!(g0.standard_gamma(-0.0, &[3]).is_err());
+    assert!(g0.standard_gamma_f32(-0.0, &[3]).is_err());
+    assert!(g0.rayleigh(-0.0, &[3]).is_err());
+    assert!(g0.weibull(-0.0, &[3]).is_err());
+    assert!(g0.uniform(0.0, -0.0, &[3]).is_err());
+    assert!(g0.vonmises(0.0, -0.0, &[3]).is_err());
+    check_i64_arr(&g0.poisson(-0.0, &[3]).unwrap(), &oracle, "g_pois_nz");
+    check_i64_arr(&g0.binomial(5, -0.0, &[3]).unwrap(), &oracle, "g_bin_nz");
+
+    let mut rs0 = RandomState::from_seed(0);
+    assert!(rs0.normal(0.0, -0.0, &[3]).is_err());
+    assert!(rs0.standard_gamma(-0.0, &[3]).is_err());
+    assert!(rs0.rayleigh(-0.0, &[3]).is_err());
+    assert!(rs0.weibull(-0.0, &[3]).is_err());
+    check_f64_arr(&rs0.uniform(0.0, -0.0, &[3]).unwrap(), &oracle, "rs_uni_nz", 0.0);
+    assert!(rs0.vonmises(0.0, -0.0, &[3]).is_err());
+    check_i64_arr(&rs0.poisson(-0.0, &[3]).unwrap(), &oracle, "rs_pois_nz");
+    check_i64_arr(&rs0.binomial(5, -0.0, &[3]).unwrap(), &oracle, "rs_bin_nz");
+
+    // FIX(F-B3-03): empty seed slices rejected
+    assert!(MT19937::from_legacy_key(&[]).is_err());
+    assert!(RandomState::from_seed_slice(&[]).is_err());
+
+    // FIX(F-B3-05): fill_bytes agrees with Generator::bytes u32-LE stream
+    let mut mt = MT19937::from_seed(1u64).unwrap();
+    let mut fb = [0u8; 7];
+    mt.fill_bytes(&mut fb);
+    let hex: String = fb.iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(hex, oracle.val("mt_bytes7"));
+
+    // FIX(F-B3-07): SeedInput arbitrary-precision decimal/hex string coercion
+    let si = SeedInput::from_big_uint_str("1234567890123456789012345678901234567890").unwrap();
+    let ss_st = SeedSequence::from_seed(si).unwrap().generate_state_u32(4);
+    assert_eq!(ss_st, oracle.arr("ss_big_st").to_u32_vec());
 }

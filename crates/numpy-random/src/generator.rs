@@ -251,6 +251,8 @@ pub(crate) fn alloc_and_fill<T: Scalar, F: FnMut(&mut [MaybeUninit<T>])>(
     NdArray::from_aligned_buffer(buf, shape, Order::C)
 }
 
+const PAR_FILL_CHUNK_SIZE: usize = 16_384;
+
 #[inline]
 pub(crate) fn alloc_and_par_fill<
     T: Scalar + Send,
@@ -266,11 +268,8 @@ pub(crate) fn alloc_and_par_fill<
     if len < threshold {
         return alloc_and_fill(shape, |slice| fill_chunk(bitgen, slice));
     }
-    let n_threads = rayon::current_num_threads().max(1);
-    if n_threads <= 1 {
-        return alloc_and_fill(shape, |slice| fill_chunk(bitgen, slice));
-    }
-    let chunk_size = len.div_ceil(n_threads).max(16_384);
+    // FIX(F-B3-04): use a fixed chunk size independent of rayon thread count for reproducible parallel streams.
+    let chunk_size = PAR_FILL_CHUNK_SIZE;
     let n_chunks = len.div_ceil(chunk_size);
     let children = bitgen.spawn_or_fork(n_chunks)?;
     let mut uninit = AlignedBuffer::<T>::new_uninit(len);
@@ -287,7 +286,8 @@ pub(crate) fn alloc_and_par_fill<
 
 #[inline]
 fn validate_non_negative(name: &str, v: f64) -> Result<()> {
-    if v.is_nan() || v < 0.0 {
+    // NumPy _common.pyx rejects -0.0 via signbit check on CONS_NON_NEGATIVE parameters.
+    if v.is_nan() || v.is_sign_negative() {
         return Err(NumPyError::InvalidValue(format!("{name} < 0")));
     }
     Ok(())
@@ -608,7 +608,7 @@ impl<B: BitGenerator> Generator<B> {
 
     /// Draw standard gamma (`scale = 1.0`) `f32` samples.
     pub fn standard_gamma_f32(&mut self, shape_param: f32, shape: &[usize]) -> Result<NdArray<f32>> {
-        if shape_param.is_nan() || shape_param < 0.0 {
+        if shape_param.is_nan() || shape_param.is_sign_negative() {
             return Err(NumPyError::InvalidValue("shape < 0".into()));
         }
         let bg = &mut self.bit_generator;
@@ -941,9 +941,9 @@ impl<B: BitGenerator> Generator<B> {
         })
     }
 
-    /// Draw von Mises distribution samples (`kappa >= 0`).
+    /// Draw von Mises distribution samples (`kappa >= 0`; `NaN` propagates).
     pub fn vonmises(&mut self, mu: f64, kappa: f64, shape: &[usize]) -> Result<NdArray<f64>> {
-        if kappa < 0.0 {
+        if !kappa.is_nan() && kappa.is_sign_negative() {
             return Err(NumPyError::InvalidValue("kappa < 0".into()));
         }
         let bg = &mut self.bit_generator;

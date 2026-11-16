@@ -43,15 +43,17 @@ pub trait BitGenerator: Clone + Send {
         self.next_u64()
     }
 
-    /// Fill a byte buffer with uniform random bytes (little-endian word order).
+    /// Fill a byte buffer with uniform random bytes using the NumPy 32-bit little-endian stream
+    /// (`Generator::bytes` / `RandomState::bytes`).
     fn fill_bytes(&mut self, dest: &mut [u8]) {
-        let mut chunks = dest.chunks_exact_mut(8);
+        // FIX(F-B3-05): align fill_bytes with Generator::bytes u32-LE stream.
+        let mut chunks = dest.chunks_exact_mut(4);
         for chunk in &mut chunks {
-            chunk.copy_from_slice(&self.next_u64().to_le_bytes());
+            chunk.copy_from_slice(&self.next_u32().to_le_bytes());
         }
         let rem = chunks.into_remainder();
         if !rem.is_empty() {
-            let tail = self.next_u64().to_le_bytes();
+            let tail = self.next_u32().to_le_bytes();
             rem.copy_from_slice(&tail[..rem.len()]);
         }
     }

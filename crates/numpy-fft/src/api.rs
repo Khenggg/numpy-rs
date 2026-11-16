@@ -586,3 +586,72 @@ pub fn fftshift<A: ShiftInput + ?Sized>(x: &A, axes: Option<&[isize]>) -> Result
 pub fn ifftshift<A: ShiftInput + ?Sized>(x: &A, axes: Option<&[isize]>) -> Result<A::Output> {
     x.shift(axes, false)
 }
+
+/// Axis selection mode for 2-D FFT entry points distinguishing omitted `axes`
+/// (`Default`, i.e. last two axes `[-2, -1]`) from Python explicit `axes=None` (`All`,
+/// i.e. transform all axes or the last `s.len()` axes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fft2Axes<'a> {
+    Default,
+    None,
+    Explicit(&'a [isize]),
+}
+
+impl<'a> Fft2Axes<'a> {
+    #[inline]
+    fn resolve(self) -> (Option<&'a [isize]>, bool) {
+        match self {
+            Fft2Axes::Default => (None, true),
+            Fft2Axes::None => (None, false),
+            Fft2Axes::Explicit(axes) => (Some(axes), true),
+        }
+    }
+}
+
+/// Compute the 2-D discrete Fourier Transform (`numpy.fft.fft2`) with explicit `Fft2Axes` semantics.
+#[inline]
+pub fn fft2_with_axes<A: ComplexFftInput + ?Sized>(
+    a: &A,
+    s: Option<&[isize]>,
+    axes: Fft2Axes<'_>,
+    norm: Norm,
+) -> Result<A::Output> {
+    let (axes, default_last_two) = axes.resolve();
+    a.fft_nd(s, axes, true, norm, default_last_two)
+}
+
+/// Compute the 2-D inverse discrete Fourier Transform (`numpy.fft.ifft2`) with explicit `Fft2Axes` semantics.
+#[inline]
+pub fn ifft2_with_axes<A: ComplexFftInput + ?Sized>(
+    a: &A,
+    s: Option<&[isize]>,
+    axes: Fft2Axes<'_>,
+    norm: Norm,
+) -> Result<A::Output> {
+    let (axes, default_last_two) = axes.resolve();
+    a.fft_nd(s, axes, false, norm, default_last_two)
+}
+
+/// Compute the 2-D real discrete Fourier Transform (`numpy.fft.rfft2`) with explicit `Fft2Axes` semantics.
+#[inline]
+pub fn rfft2_with_axes<A: RealFftInput + ?Sized>(
+    a: &A,
+    s: Option<&[isize]>,
+    axes: Fft2Axes<'_>,
+    norm: Norm,
+) -> Result<A::ComplexOutput> {
+    let (axes, default_last_two) = axes.resolve();
+    a.rfft_nd(s, axes, norm, default_last_two)
+}
+
+/// Compute the inverse 2-D real discrete Fourier Transform (`numpy.fft.irfft2`) with explicit `Fft2Axes` semantics.
+#[inline]
+pub fn irfft2_with_axes<A: InverseRealFftInput + ?Sized>(
+    a: &A,
+    s: Option<&[isize]>,
+    axes: Fft2Axes<'_>,
+    norm: Norm,
+) -> Result<A::RealOutput> {
+    let (axes, default_last_two) = axes.resolve();
+    a.irfft_nd(s, axes, norm, default_last_two)
+}

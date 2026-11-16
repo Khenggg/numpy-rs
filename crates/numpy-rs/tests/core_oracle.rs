@@ -1512,3 +1512,91 @@ except Exception as e:
         Err(numpy_types::NumPyError::ShapeMismatch(_))
     ));
 }
+
+#[test]
+fn p0_p1_core_order_k_einsum_pad_indexing_and_ravel_against_numpy() {
+    let oracle = run_oracle(
+        r#"
+b = np.arange(24, dtype=np.int32).reshape(2, 3, 4)
+bt = np.transpose(b, (2, 0, 1))
+emit_arr("bt_rav_k", bt.ravel('K'))
+emit_arr("bt_flt_k", bt.flatten('K'))
+bf = np.asfortranarray(b[:, :, :2])
+emit_arr("res_f_a", np.reshape(bf, (2, 6), order='A'))
+emit_arr("pad0", np.pad(np.array(7.0), 3, mode='constant', constant_values=9.0))
+a_p = np.arange(6, dtype=np.int32).reshape(2, 3)
+m_f = np.asfortranarray(np.array([[True, False, True], [False, True, False]]))
+np.putmask(a_p, m_f, [10, 20])
+emit_arr("putmask_f", a_p)
+emit_arr("extract_short", np.extract([True, False, True], np.arange(10, 16, dtype=np.int32)))
+emit_arr("rav_empty02", np.ravel_multi_index((np.array([], dtype=np.intp), np.array([], dtype=np.intp)), (0, 2)))
+for tag, fn in [
+    ("ein_drop", lambda: np.einsum("...i->i", np.zeros((2, 3, 4)))),
+    ("res_k", lambda: np.reshape(b, (4, 6), order='K')),
+    ("rav_huge", lambda: np.ravel_multi_index((np.array([], dtype=np.intp), np.array([], dtype=np.intp), np.array([], dtype=np.intp)), (0, 1 << 62, 1 << 62))),
+    ("rav_zero_ne", lambda: np.ravel_multi_index(([0], [0]), (0, 2), mode='clip')),
+    ("unrav_k", lambda: np.unravel_index([0, 1], (2, 2), order='K')),
+]:
+    try:
+        fn()
+    except Exception as e:
+        emit_err(tag, e)
+"#,
+    );
+
+    // Order::K ravel & flatten on non-contiguous transposed 3-D array
+    let b = NdArray::from_shape_vec(&[2, 3, 4], (0..24i32).collect()).unwrap();
+    let bt = b.transpose(Some(&[2, 0, 1])).unwrap();
+    let bt_rk = numpy_core::ravel_with_order(&bt, Order::K).unwrap();
+    let bt_fk = numpy_core::flatten_with_order(&bt, Order::K).unwrap();
+    assert!(!bt.shares_storage(&bt_fk));
+    assert_dyn_matches_oracle(&bt_rk.into(), oracle.arr("bt_rav_k"), 0.0, 0.0, false, false, "bt_rav_k");
+    assert_dyn_matches_oracle(&bt_fk.into(), oracle.arr("bt_flt_k"), 0.0, 0.0, false, false, "bt_flt_k");
+
+    // reshape Order::A preserves F-order and Order::K is rejected
+    let bf = b.slice(&[SliceArg::from(..), SliceArg::from(..), SliceArg::from(0..2)]).unwrap().to_f_contiguous();
+    let res_f_a = numpy_core::reshape_with_order(&bf, &[2, 6], Order::A).unwrap();
+    assert_dyn_matches_oracle(&res_f_a.into(), oracle.arr("res_f_a"), 0.0, 0.0, false, false, "res_f_a");
+    assert!(oracle.errors.contains_key("res_k"));
+    assert!(numpy_core::reshape_with_order(&b, &[4, 6], Order::K).is_err());
+
+    // 0-D pad ignores scalar widths and rejects multi-axis widths
+    let s0 = NdArray::from_scalar(7.0f64);
+    let pad0 = pad(&s0, &PadWidth::Uniform(3), &PadMode::Constant(9.0)).unwrap();
+    assert_dyn_matches_oracle(&pad0.into(), oracle.arr("pad0"), 0.0, 0.0, false, false, "pad0");
+    assert!(pad(&s0, &PadWidth::Pair(1, 2), &PadMode::Constant(0.0)).is_ok());
+    assert!(pad(&s0, &PadWidth::Axes(vec![(1, 1), (2, 2)]), &PadMode::Constant(0.0)).is_err());
+
+    // einsum explicit output must not silently drop non-empty ellipsis
+    assert!(oracle.errors.contains_key("ein_drop"));
+    assert!(einsum("...i->i", &[&NdArray::<f64>::zeros(&[2, 3, 4]).unwrap()]).is_err());
+    assert!(einsum("...i->i", &[&NdArray::from_vec(vec![1.0f64, 2.0, 3.0])]).is_ok());
+
+    // putmask F-order mask flattens in C order & rejects mismatched mask size
+    let mut a_p = NdArray::from_shape_vec(&[2, 3], (0..6i32).collect()).unwrap();
+    let m_f = NdArray::from_shape_vec(&[2, 3], vec![true, false, true, false, true, false]).unwrap().to_f_contiguous();
+    putmask(&mut a_p, &m_f, &NdArray::from_vec(vec![10i32, 20])).unwrap();
+    assert_dyn_matches_oracle(&a_p.clone().into(), oracle.arr("putmask_f"), 0.0, 0.0, false, false, "putmask_f");
+    assert!(putmask(&mut a_p, &NdArray::from_vec(vec![true, false]), &NdArray::from_vec(vec![1])).is_err());
+
+    // put with empty indices/values & extract with short/long condition
+    let empty_i64 = NdArray::<i64>::from_vec(vec![]);
+    let empty_i32 = NdArray::<i32>::from_vec(vec![]);
+    put(&mut a_p, &empty_i64, &NdArray::from_vec(vec![99i32]), IndexMode::Raise).unwrap();
+    put(&mut a_p, &NdArray::from_vec(vec![0i64, 1]), &empty_i32, IndexMode::Raise).unwrap();
+    let arr10_16 = NdArray::from_vec((10..16i32).collect());
+    let ex_s = extract(&NdArray::from_vec(vec![true, false, true]), &arr10_16).unwrap();
+    assert_dyn_matches_oracle(&ex_s.into(), oracle.arr("extract_short"), 0.0, 0.0, false, false, "extract_short");
+    assert!(extract(&NdArray::from_vec(vec![true; 7]), &arr10_16).is_err());
+
+    // ravel_multi_index overflow / zero-dim & unravel_index Order::K
+    assert!(oracle.errors.contains_key("rav_huge"));
+    assert!(ravel_multi_index(&[&empty_i64, &empty_i64, &empty_i64], &[0, 1usize << 62, 1usize << 62], IndexMode::Raise, Order::C).is_err());
+    assert!(oracle.errors.contains_key("rav_zero_ne"));
+    let zero_idx = NdArray::from_vec(vec![0i64]);
+    assert!(ravel_multi_index(&[&zero_idx, &zero_idx], &[0, 2], IndexMode::Clip, Order::C).is_err());
+    let rav_ok = ravel_multi_index(&[&empty_i64, &empty_i64], &[0, 2], IndexMode::Raise, Order::C).unwrap();
+    assert_dyn_matches_oracle(&rav_ok.into(), oracle.arr("rav_empty02"), 0.0, 0.0, false, false, "rav_empty02");
+    assert!(oracle.errors.contains_key("unrav_k"));
+    assert!(unravel_index(&NdArray::from_vec(vec![0i64, 1]), &[2, 2], Order::K).is_err());
+}

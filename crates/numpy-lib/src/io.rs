@@ -316,15 +316,15 @@ pub fn read_npy(reader: &mut impl Read) -> Result<DynArray> {
         pos: 0,
     }
     .parse()?;
-    if descr.len() < 2 {
-        return Err(io_error("invalid NPY descr"));
-    }
-    let endian = descr.as_bytes()[0];
-    if !matches!(endian, b'<' | b'>' | b'|' | b'=') {
-        return Err(io_error("invalid NPY endian marker"));
-    }
-    let big = endian == b'>' || (endian == b'=' && cfg!(target_endian = "big"));
-    let dtype = match &descr[1..] {
+    // FIX(F-A3-03): accept native descriptors without endian prefix ('i4', 'f8', '?').
+    let (big, type_code) = match descr.as_bytes().first() {
+        Some(b'<') => (false, &descr[1..]),
+        Some(b'>') => (true, &descr[1..]),
+        Some(b'|' | b'=') => (cfg!(target_endian = "big"), &descr[1..]),
+        Some(_) => (cfg!(target_endian = "big"), descr),
+        None => return Err(io_error("invalid NPY descr")),
+    };
+    let dtype = match type_code {
         "b1" | "?" => DType::Bool,
         "i1" => DType::I8,
         "u1" => DType::U8,
@@ -468,6 +468,29 @@ pub fn loadtxt(
         _ => Err(io_error("invalid text shape")),
     }
 }
+fn write_savetxt_f64(writer: &mut impl Write, v: f64) -> Result<()> {
+    if v.is_nan() {
+        writer.write_all(b"nan")?;
+        return Ok(());
+    }
+    if v == f64::INFINITY {
+        writer.write_all(b"inf")?;
+        return Ok(());
+    }
+    if v == f64::NEG_INFINITY {
+        writer.write_all(b"-inf")?;
+        return Ok(());
+    }
+    let formatted = format!("{v:.18e}");
+    let Some((mantissa, exp_str)) = formatted.split_once('e') else {
+        writer.write_all(formatted.as_bytes())?;
+        return Ok(());
+    };
+    let exp: i32 = exp_str.parse().unwrap_or(0);
+    write!(writer, "{mantissa}e{exp:+03}")?;
+    Ok(())
+}
+
 pub fn savetxt<T: Scalar>(path: impl AsRef<Path>, a: &NdArray<T>, delimiter: &str) -> Result<()> {
     if a.ndim() == 0 || a.ndim() > 2 || matches!(T::DTYPE, DType::C64 | DType::C128) {
         return Err(invalid("savetxt supports real vectors and matrices"));
@@ -483,7 +506,7 @@ pub fn savetxt<T: Scalar>(path: impl AsRef<Path>, a: &NdArray<T>, delimiter: &st
             if i % width != 0 {
                 write!(writer, "{delimiter}")?;
             }
-            write!(writer, "{:.18e}", x.to_f64_lossy())?;
+            write_savetxt_f64(&mut writer, x.to_f64_lossy())?;
             if (i + 1) % width == 0 {
                 writeln!(writer)?;
             }

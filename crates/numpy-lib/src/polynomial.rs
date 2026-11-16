@@ -35,8 +35,9 @@ pub fn polysub(a: &[f64], b: &[f64]) -> Vec<f64> {
     polyadd(a, &b.iter().map(|x| -x).collect::<Vec<_>>())
 }
 pub fn polymul(a: &[f64], b: &[f64]) -> Vec<f64> {
+    // FIX(F-A3-09): NumPy returns max(len(a)+len(b), 1) zeros when either input is empty.
     if a.is_empty() || b.is_empty() {
-        return vec![0.];
+        return vec![0.; (a.len() + b.len()).max(1)];
     }
     let mut c = vec![0.; a.len() + b.len() - 1];
     for (i, &x) in a.iter().enumerate() {
@@ -47,24 +48,29 @@ pub fn polymul(a: &[f64], b: &[f64]) -> Vec<f64> {
     trim(c)
 }
 pub fn polydiv(a: &[f64], b: &[f64]) -> Result<(Vec<f64>, Vec<f64>)> {
-    let a = trim(a.to_vec());
-    let b = trim(b.to_vec());
+    // FIX(F-A3-04): preserve leading zeros in inputs/quotient (trim only remainder)
+    if a.is_empty() || b.is_empty() {
+        return Err(invalid("empty polynomial in polydiv"));
+    }
     if b.iter().all(|&v| v == 0.) {
         return Err(invalid("polynomial division by zero"));
     }
-    if a.len() < b.len() {
-        return Ok((vec![0.], a));
-    }
-    let n = a.len() - b.len() + 1;
-    let mut r = a;
-    let mut q = vec![0.; n];
-    for i in 0..n {
-        q[i] = r[i] / b[0];
-        for j in 0..b.len() {
-            r[i + j] -= q[i] * b[j];
+    let m = a.len() - 1;
+    let n = b.len() - 1;
+    let q_len = (m + 1).saturating_sub(n).max(1);
+    let mut q = vec![0.; q_len];
+    let mut r = a.to_vec();
+    if a.len() >= b.len() {
+        let scale = 1.0 / b[0];
+        for k in 0..=(m - n) {
+            let d = scale * r[k];
+            q[k] = d;
+            for j in 0..b.len() {
+                r[k + j] -= d * b[j];
+            }
         }
     }
-    Ok((trim(q), trim(r[n..].to_vec())))
+    Ok((q, trim(r)))
 }
 pub fn polyder(coefficients: &[f64], order: usize) -> Vec<f64> {
     let mut c = coefficients.to_vec();
@@ -80,9 +86,26 @@ pub fn polyder(coefficients: &[f64], order: usize) -> Vec<f64> {
     c
 }
 pub fn polyint(coefficients: &[f64], order: usize, constants: &[f64]) -> Result<Vec<f64>> {
-    if !constants.is_empty() && constants.len() != 1 && constants.len() != order {
-        return Err(invalid("integration constants must have length 1 or order"));
-    }
+    // FIX(F-A3-05): allow constants.len() > order (use first `order` constants)
+    let k = if constants.is_empty() { None } else { Some(constants) };
+    polyint_with_constants(coefficients, order, k)
+}
+pub fn polyint_with_constants(
+    coefficients: &[f64],
+    order: usize,
+    constants: Option<&[f64]>,
+) -> Result<Vec<f64>> {
+    let constants = match constants {
+        None => &[][..],
+        Some(k) => {
+            if order > 0 && k.len() != 1 && k.len() < order {
+                return Err(invalid(
+                    "integration constants must have length 1 or >= order",
+                ));
+            }
+            k
+        }
+    };
     let mut c = coefficients.to_vec();
     c.len()
         .checked_add(order)

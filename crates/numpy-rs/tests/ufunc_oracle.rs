@@ -615,3 +615,72 @@ emit_arr("at_true_idx", at_t2)
         .unwrap();
     assert_dyn_matches_oracle(&at_t2, o.arr("at_true_idx"), 0.0, 0.0, false, true, "at_true_idx");
 }
+
+#[test]
+fn p0_p1_int_reciprocal_neg_zero_max_min_reduce_and_initial_bounds() {
+    let a64 = NdArray::from_vec(vec![0.0f64, -0.0, 0.0, f64::NAN, 1.0]);
+    let b64 = NdArray::from_vec(vec![-0.0f64, 0.0, 0.0, 1.0, f64::NAN]);
+    let a32 = NdArray::from_vec(vec![0.0f32, -0.0, 0.0, f32::NAN, 1.0]);
+    let b32 = NdArray::from_vec(vec![-0.0f32, 0.0, 0.0, 1.0, f32::NAN]);
+    let neg0 = NdArray::from_vec(vec![-0.0f64]);
+    let i8_a = NdArray::from_vec(vec![0i8, 1, -2, 2]);
+    let i16_a = NdArray::from_vec(vec![0i16, 1, -2, 2]);
+    let u64_a = NdArray::from_vec(vec![0u64, 1, 2]);
+
+    let oracle = run_oracle(&format!(
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        py_assign_dyn("a64", &DynArray::F64(a64.clone())),
+        py_assign_dyn("b64", &DynArray::F64(b64.clone())),
+        py_assign_dyn("a32", &DynArray::F32(a32.clone())),
+        py_assign_dyn("b32", &DynArray::F32(b32.clone())),
+        py_assign_dyn("neg0", &DynArray::F64(neg0.clone())),
+        py_assign_dyn("i8_a", &DynArray::I8(i8_a.clone())),
+        py_assign_dyn("i16_a", &DynArray::I16(i16_a.clone())),
+        py_assign_dyn("u64_a", &DynArray::U64(u64_a.clone())),
+        r#"
+emit_arr("rec_i8", np.reciprocal(i8_a))
+emit_arr("rec_i16", np.reciprocal(i16_a))
+emit_arr("rec_u64", np.reciprocal(u64_a))
+emit_arr("max64", np.maximum(a64, b64))
+emit_arr("min64", np.minimum(a64, b64))
+emit_arr("max32", np.maximum(a32, b32))
+emit_arr("min32", np.minimum(a32, b32))
+emit_arr("fmax64", np.fmax(a64, b64))
+emit_arr("fmin64", np.fmin(a64, b64))
+emit_arr("add_neg0", np.array(np.add.reduce(neg0), dtype=np.float64))
+emit_arr("mul_neg0", np.array(np.multiply.reduce(neg0), dtype=np.float64))
+emit_arr("max_neg0", np.array(np.maximum.reduce(neg0), dtype=np.float64))
+"#
+    ));
+
+    // FIX(F-A2-01): integer reciprocal at 0
+    assert_dyn_matches_oracle(&reciprocal(&DynArray::I8(i8_a)).unwrap(), oracle.arr("rec_i8"), 0., 0., false, false, "rec_i8");
+    assert_dyn_matches_oracle(&reciprocal(&DynArray::I16(i16_a)).unwrap(), oracle.arr("rec_i16"), 0., 0., false, false, "rec_i16");
+    assert_dyn_matches_oracle(&reciprocal(&DynArray::U64(u64_a)).unwrap(), oracle.arr("rec_u64"), 0., 0., false, false, "rec_u64");
+
+    // FIX(F-A2-02 + T-AUD-UFUNC-NAN): maximum/minimum/fmax/fmin signed zero & NaN
+    let da64 = DynArray::F64(a64);
+    let db64 = DynArray::F64(b64);
+    let da32 = DynArray::F32(a32);
+    let db32 = DynArray::F32(b32);
+    assert_dyn_matches_oracle(&maximum(&da64, &db64).unwrap(), oracle.arr("max64"), 0., 0., true, true, "max64");
+    assert_dyn_matches_oracle(&minimum(&da64, &db64).unwrap(), oracle.arr("min64"), 0., 0., true, true, "min64");
+    assert_dyn_matches_oracle(&maximum(&da32, &db32).unwrap(), oracle.arr("max32"), 0., 0., true, true, "max32");
+    assert_dyn_matches_oracle(&minimum(&da32, &db32).unwrap(), oracle.arr("min32"), 0., 0., true, true, "min32");
+    assert_dyn_matches_oracle(&fmax(&da64, &db64).unwrap(), oracle.arr("fmax64"), 0., 0., true, true, "fmax64");
+    assert_dyn_matches_oracle(&fmin(&da64, &db64).unwrap(), oracle.arr("fmin64"), 0., 0., true, true, "fmin64");
+
+    // FIX(F-A2-03): singleton [-0.0] reduction seeds accumulator with identity
+    let dneg0 = DynArray::F64(neg0);
+    assert_dyn_matches_oracle(&reduce(BinaryOp::Add, &dneg0, None, None, false, None).unwrap(), oracle.arr("add_neg0"), 0., 0., false, true, "add_neg0");
+    assert_dyn_matches_oracle(&reduce(BinaryOp::Multiply, &dneg0, None, None, false, None).unwrap(), oracle.arr("mul_neg0"), 0., 0., false, true, "mul_neg0");
+    assert_dyn_matches_oracle(&reduce(BinaryOp::Maximum, &dneg0, None, None, false, None).unwrap(), oracle.arr("max_neg0"), 0., 0., false, true, "max_neg0");
+
+    // FIX(F-A2-04): reduce initial NaN / Inf / out-of-range int rejected instead of saturating
+    let i32_arr = DynArray::I32(NdArray::from_vec(vec![1, 2, 3]));
+    assert!(reduce(BinaryOp::Add, &i32_arr, None, None, false, Some(ScalarValue::F64(f64::NAN))).is_err());
+    assert!(reduce(BinaryOp::Add, &i32_arr, None, None, false, Some(ScalarValue::F64(1e300))).is_err());
+    assert!(reduce(BinaryOp::Add, &i32_arr, None, Some(DType::I32), false, Some(ScalarValue::I64(i64::MAX))).is_err());
+    assert!(reduce(BinaryOp::Maximum, &i32_arr, None, None, false, Some(ScalarValue::I64(i64::MAX))).is_err());
+    assert!(reduce(BinaryOp::Add, &DynArray::F32(NdArray::from_vec(vec![1.0f32])), None, None, false, Some(ScalarValue::C64(num_complex::Complex32::new(1.0, 2.0)))).is_err());
+}

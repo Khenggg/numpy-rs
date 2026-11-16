@@ -136,10 +136,12 @@ fn calendar_roundtrips_leap_days_negative_epoch_and_units() {
             .value,
         -1
     );
-    assert!(
+    assert_eq!(
         TimeDelta64::new(1, TimeUnit::Month)
             .cast(TimeUnit::Day)
-            .is_err()
+            .unwrap()
+            .value,
+        30
     );
     assert!(
         DateTime64::new(i64::MAX, TimeUnit::Day)

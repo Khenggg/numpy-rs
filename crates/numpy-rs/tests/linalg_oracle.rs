@@ -281,7 +281,7 @@ emit_arr('tinv', np.linalg.tensorinv(tinva, ind=1))
 x, res, rnk, s = np.linalg.lstsq(tall, tall_b, rcond=None)
 emit_arr('lstsq_x', x)
 emit_arr('lstsq_res', res)
-emit_arr('lstsq_rnk', np.array(rnk, dtype=np.int64))
+emit_arr('lstsq_rnk', np.asarray(rnk))
 emit_arr('lstsq_s', s)
 emit_arr('chol_l', np.linalg.cholesky(spd))
 emit_arr('chol_u', np.linalg.cholesky(spd, upper=True))
@@ -398,4 +398,180 @@ except Exception as e:
         cross(&a, &b, -1),
         Err(numpy_types::NumPyError::InvalidValue(_))
     ));
+}
+
+#[test]
+fn p1_linalg_f16_norms_overflow_hermitian_nan_lstsq_rank_and_qr_complex_raw() {
+    use numpy_linalg::*;
+    use numpy_types::{f16, DType, NumPyError};
+
+    let py = r#"
+for tag, fn in [
+    ("svd_f16", lambda: np.linalg.svd(np.eye(2, dtype=np.float16))),
+    ("inv_f16", lambda: np.linalg.inv(np.eye(2, dtype=np.float16))),
+    ("solve_f16", lambda: np.linalg.solve(np.eye(2, dtype=np.float16), np.ones(2, dtype=np.float16))),
+    ("det_f16", lambda: np.linalg.det(np.eye(2, dtype=np.float16))),
+    ("cond_f16", lambda: np.linalg.cond(np.eye(2, dtype=np.float16))),
+    ("rank_f16", lambda: np.linalg.matrix_rank(np.eye(2, dtype=np.float16))),
+    ("mpow_neg_f16", lambda: np.linalg.matrix_power(np.eye(2, dtype=np.float16), -1)),
+    ("mnorm_l2_f16", lambda: np.linalg.matrix_norm(np.eye(2, dtype=np.float16), ord=2)),
+    ("mnorm_nuc_f16", lambda: np.linalg.matrix_norm(np.eye(2, dtype=np.float16), ord='nuc')),
+]:
+    try:
+        fn()
+    except Exception as e:
+        emit_err(tag, e)
+
+emit_arr("n_f16_ok", np.linalg.norm(np.array([3.0, 4.0], dtype=np.float16)))
+emit_arr("n_f16_ovf", np.linalg.norm(np.array([200.0, 200.0], dtype=np.float16)))
+emit_arr("n_f16_udf", np.linalg.norm(np.array([1e-4, 1e-4], dtype=np.float16)))
+emit_arr("mn_f16_fro", np.linalg.matrix_norm(np.eye(2, dtype=np.float16), ord='fro'))
+
+emit_arr("v_big_2", np.linalg.vector_norm(np.array([1e200, 1e200]), ord=2.0))
+emit_arr("v_small_2", np.linalg.vector_norm(np.array([1e-200, 1e-200]), ord=2.0))
+emit_arr("v_big_3", np.linalg.vector_norm(np.array([1e200, 1e200]), ord=3.0))
+emit_arr("v_big_neg2", np.linalg.vector_norm(np.array([1e200, 1e200]), ord=-2.0))
+emit_arr("f32_big_2", np.linalg.vector_norm(np.array([1e30, 1e30], dtype=np.float32), ord=2.0))
+emit_arr("f32_small_2", np.linalg.vector_norm(np.array([1e-30, 1e-30], dtype=np.float32), ord=2.0))
+emit_arr("m_big_fro", np.linalg.matrix_norm(np.array([[1e200, 0.0], [0.0, 1e200]]), ord='fro'))
+
+a_nan = np.array([[1.0, np.nan], [np.nan, 2.0]])
+u_h, s_h, vh_h = np.linalg.svd(a_nan, hermitian=True)
+emit_arr("svd_h_nan_s", s_h)
+emit_arr("pinv_h_nan", np.linalg.pinv(a_nan, hermitian=True))
+
+_, _, rnk, _ = np.linalg.lstsq(np.eye(2), np.ones(2), rcond=None)
+emit_arr("lstsq_rnk_i32", np.asarray(rnk))
+"#;
+    let o = run_oracle(py);
+
+    let eye_f16 = DynArray::F16(NdArray::from_shape_vec(&[2, 2], vec![f16::ONE, f16::ZERO, f16::ZERO, f16::ONE]).unwrap());
+    let vec_f16_one = DynArray::F16(NdArray::from_vec(vec![f16::ONE, f16::ONE]));
+    for (tag, res) in [
+        ("svd_f16", svd_dyn(&eye_f16, true, true, false).map(|_| ())),
+        ("inv_f16", inv_dyn(&eye_f16).map(|_| ())),
+        ("solve_f16", solve_dyn(&eye_f16, &vec_f16_one).map(|_| ())),
+        ("det_f16", det_dyn(&eye_f16).map(|_| ())),
+        ("cond_f16", cond_dyn(&eye_f16, NormOrd::Default).map(|_| ())),
+        ("rank_f16", matrix_rank_dyn(&eye_f16, None, None, false).map(|_| ())),
+        ("mpow_neg_f16", matrix_power_dyn(&eye_f16, -1).map(|_| ())),
+        ("mnorm_l2_f16", matrix_norm_dyn(&eye_f16, NormOrd::L2, false).map(|_| ())),
+        ("mnorm_nuc_f16", matrix_norm_dyn(&eye_f16, NormOrd::Nuc, false).map(|_| ())),
+    ] {
+        assert!(o.errors.contains_key(tag), "missing oracle err for {tag}");
+        assert!(matches!(res, Err(NumPyError::DTypeError(_))), "{tag} should fail with DTypeError");
+    }
+
+    let v_ok = DynArray::F16(NdArray::from_vec(vec![f16::from_f32(3.0), f16::from_f32(4.0)]));
+    let v_ovf = DynArray::F16(NdArray::from_vec(vec![f16::from_f32(200.0), f16::from_f32(200.0)]));
+    let v_udf = DynArray::F16(NdArray::from_vec(vec![f16::from_f32(1e-4), f16::from_f32(1e-4)]));
+    assert_dyn_matches_oracle(&norm_dyn(&v_ok, NormOrd::Default, None, false).unwrap(), o.arr("n_f16_ok"), 1e-3, 1e-3, false, false, "n_f16_ok");
+    assert_dyn_matches_oracle(&norm_dyn(&v_ovf, NormOrd::Default, None, false).unwrap(), o.arr("n_f16_ovf"), 0.0, 0.0, false, false, "n_f16_ovf");
+    assert_dyn_matches_oracle(&norm_dyn(&v_udf, NormOrd::Default, None, false).unwrap(), o.arr("n_f16_udf"), 0.0, 0.0, false, false, "n_f16_udf");
+    assert_dyn_matches_oracle(&matrix_norm_dyn(&eye_f16, NormOrd::Fro, false).unwrap(), o.arr("mn_f16_fro"), 1e-3, 1e-3, false, false, "mn_f16_fro");
+
+    assert_dyn_matches_oracle(&vector_norm(&NdArray::from_vec(vec![1e200f64, 1e200]), 2.0, None, false).unwrap().into(), o.arr("v_big_2"), 0.0, 0.0, false, false, "v_big_2");
+    assert_dyn_matches_oracle(&vector_norm(&NdArray::from_vec(vec![1e-200f64, 1e-200]), 2.0, None, false).unwrap().into(), o.arr("v_small_2"), 0.0, 0.0, false, false, "v_small_2");
+    assert_dyn_matches_oracle(&vector_norm(&NdArray::from_vec(vec![1e200f64, 1e200]), 3.0, None, false).unwrap().into(), o.arr("v_big_3"), 0.0, 0.0, false, false, "v_big_3");
+    assert_dyn_matches_oracle(&vector_norm(&NdArray::from_vec(vec![1e200f64, 1e200]), -2.0, None, false).unwrap().into(), o.arr("v_big_neg2"), 0.0, 0.0, false, false, "v_big_neg2");
+    assert_dyn_matches_oracle(&vector_norm(&NdArray::from_vec(vec![1e30f32, 1e30]), 2.0, None, false).unwrap().into(), o.arr("f32_big_2"), 0.0, 0.0, false, false, "f32_big_2");
+    assert_dyn_matches_oracle(&vector_norm(&NdArray::from_vec(vec![1e-30f32, 1e-30]), 2.0, None, false).unwrap().into(), o.arr("f32_small_2"), 0.0, 0.0, false, false, "f32_small_2");
+    let m_big = NdArray::from_shape_vec(&[2, 2], vec![1e200f64, 0.0, 0.0, 1e200]).unwrap();
+    assert_dyn_matches_oracle(&matrix_norm(&m_big, NormOrd::Fro, false).unwrap().into(), o.arr("m_big_fro"), 0.0, 0.0, false, false, "m_big_fro");
+
+    // Hermitian SVD & pinv succeed on NaN/Inf (do not raise LinAlgError like non-Hermitian SVD)
+    let a_nan = NdArray::from_shape_vec(&[2, 2], vec![1.0, f64::NAN, f64::NAN, 2.0]).unwrap();
+    assert!(svd(&a_nan, true, true, false).is_err());
+    let svd_h = svd(&a_nan, true, true, true).unwrap();
+    assert_dyn_matches_oracle(&svd_h.s.into(), o.arr("svd_h_nan_s"), 1e-12, 1e-12, true, false, "svd_h_nan_s");
+    assert_dyn_matches_oracle(&pinv(&a_nan, None, true).unwrap().into(), o.arr("pinv_h_nan"), 1e-12, 1e-12, true, false, "pinv_h_nan");
+    let a_diag_nan = NdArray::from_shape_vec(&[2, 2], vec![f64::NAN, 0.0, 0.0, 1.0]).unwrap();
+    assert!(svd(&a_diag_nan, true, true, true).is_ok());
+    assert!(pinv(&a_diag_nan, None, true).is_ok());
+    let a_inf = NdArray::from_shape_vec(&[2, 2], vec![f64::INFINITY, 0.0, 0.0, 1.0]).unwrap();
+    assert!(svd(&a_inf, true, true, false).is_err());
+    assert!(svd(&a_inf, true, true, true).is_ok());
+    assert!(pinv(&a_inf, None, true).is_ok());
+
+    // lstsq rank dtype == I32
+    let lsq = lstsq_dyn(
+        &DynArray::F64(NdArray::from_shape_vec(&[2, 2], vec![1.0, 0.0, 0.0, 1.0]).unwrap()),
+        &DynArray::F64(NdArray::from_vec(vec![1.0, 1.0])),
+        None,
+    )
+    .unwrap();
+    assert_eq!(lsq.rank.dtype(), DType::I32);
+    assert_dyn_matches_oracle(&lsq.rank, o.arr("lstsq_rnk_i32"), 0.0, 0.0, false, false, "lstsq_rnk_i32");
+
+    // Complex QR raw reconstruction with faer Hermitian reflectors: Q^H @ Q == I and Q^H @ A upper-triangular
+    let c32 = NdArray::from_shape_vec(
+        &[3, 2],
+        vec![
+            Complex64::new(1.0, 2.0),
+            Complex64::new(3.0, 4.0),
+            Complex64::new(5.0, 6.0),
+            Complex64::new(7.0, 8.0),
+            Complex64::new(9.0, 10.0),
+            Complex64::new(11.0, 12.0),
+        ],
+    )
+    .unwrap();
+    if let QrOutput::Raw { h, tau } = qr(&c32, QrMode::Raw).unwrap() {
+        let h_v = h.to_vec();
+        let tau_v = tau.to_vec();
+        let mut q = NdArray::from_shape_vec(
+            &[3, 3],
+            (0..9).map(|i| if i % 4 == 0 { Complex64::new(1.0, 0.0) } else { Complex64::new(0.0, 0.0) }).collect(),
+        )
+        .unwrap();
+        for j in 0..2 {
+            let mut v = vec![Complex64::new(0.0, 0.0); 3];
+            v[j] = Complex64::new(1.0, 0.0);
+            for r in (j + 1)..3 {
+                v[r] = h_v[j * 3 + r];
+            }
+            let qv = q.to_vec();
+            let mut h_mat = vec![Complex64::new(0.0, 0.0); 9];
+            for r in 0..3 {
+                for c in 0..3 {
+                    let id = if r == c { Complex64::new(1.0, 0.0) } else { Complex64::new(0.0, 0.0) };
+                    h_mat[r * 3 + c] = id - tau_v[j] * v[r] * v[c].conj();
+                }
+            }
+            let mut next_q = vec![Complex64::new(0.0, 0.0); 9];
+            for r in 0..3 {
+                for c in 0..3 {
+                    let mut s = Complex64::new(0.0, 0.0);
+                    for k in 0..3 {
+                        s += qv[r * 3 + k] * h_mat[k * 3 + c];
+                    }
+                    next_q[r * 3 + c] = s;
+                }
+            }
+            q = NdArray::from_shape_vec(&[3, 3], next_q).unwrap();
+        }
+        let qv = q.to_vec();
+        let mut qh = vec![Complex64::new(0.0, 0.0); 9];
+        for r in 0..3 {
+            for c in 0..3 {
+                qh[r * 3 + c] = qv[c * 3 + r].conj();
+            }
+        }
+        let qh_arr = NdArray::from_shape_vec(&[3, 3], qh).unwrap();
+        let qtq = matmul(&qh_arr, &q).unwrap().to_vec();
+        for r in 0..3 {
+            for c in 0..3 {
+                let target = if r == c { 1.0 } else { 0.0 };
+                assert!((qtq[r * 3 + c].re - target).abs() < 1e-11 && qtq[r * 3 + c].im.abs() < 1e-11);
+            }
+        }
+        let r_mat = matmul(&qh_arr, &c32).unwrap().to_vec();
+        for row in 0..3 {
+            for col in 0..row.min(2) {
+                assert!(r_mat[row * 2 + col].norm() < 1e-11, "subdiag ({row},{col}) not zero");
+            }
+        }
+    } else {
+        panic!("expected QrOutput::Raw");
+    }
 }

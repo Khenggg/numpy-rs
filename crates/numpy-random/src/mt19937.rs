@@ -48,14 +48,17 @@ impl MT19937 {
     }
 
     /// Construct an `MT19937` generator using legacy array seeding (`mt19937_init_by_array`).
-    pub fn from_legacy_key(init_key: &[u32]) -> Self {
+    pub fn from_legacy_key(init_key: &[u32]) -> Result<Self> {
+        if init_key.is_empty() {
+            return Err(NumPyError::InvalidValue("Seed must be non-empty".into()));
+        }
         let mut rng = Self {
             key: [0u32; N],
             pos: N,
             seed_seq: None,
         };
-        rng.legacy_seed_array(init_key);
-        rng
+        rng.legacy_seed_array(init_key)?;
+        Ok(rng)
     }
 
     /// Construct an `MT19937` generator directly from its state buffer and position.
@@ -86,11 +89,11 @@ impl MT19937 {
     }
 
     /// Re-seed in place with legacy array algorithm (`init_by_array`).
-    pub fn legacy_seed_array(&mut self, init_key: &[u32]) {
-        self.legacy_seed(19650218);
+    pub fn legacy_seed_array(&mut self, init_key: &[u32]) -> Result<()> {
         if init_key.is_empty() {
-            return;
+            return Err(NumPyError::InvalidValue("Seed must be non-empty".into()));
         }
+        self.legacy_seed(19650218);
         let key_length = init_key.len();
         let mut i: usize = 1;
         let mut j: usize = 0;
@@ -126,6 +129,7 @@ impl MT19937 {
         self.key[0] = 0x8000_0000;
         self.pos = N;
         self.seed_seq = None;
+        Ok(())
     }
 
     /// Return a copy of the generator's internal state.
