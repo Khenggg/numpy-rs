@@ -843,6 +843,8 @@ for src_name, src in [('f64', xf64), ('f32', xf32)]:
         ('u8', np.uint8), ('u16', np.uint16), ('u32', np.uint32), ('u64', np.uint64),
     ]:
         emit_arr(f'{src_name}_{dt_name}', src.astype(dt))
+emit_arr('pos_u32', np.array([0.0, -0.0, 1.5, 128.0, 256.0, 2147483648.0, 4294967295.0]).astype(np.uint32))
+emit_arr('pos_u64', np.array([0.0, -0.0, 1.5, 128.0, 256.0, 2147483648.0, 4294967295.0]).astype(np.uint64))
 a10 = np.arange(10, dtype=np.int64)
 emit_arr('s_5_6', a10[5:6])
 emit_arr('s_0_0', a10[0:0])
@@ -852,21 +854,50 @@ emit_arr('z_0_3_f', np.zeros((0, 3), dtype=np.int32, order='F'))
 "#
     ));
 
-    let targets = [
+    // Signed and narrow unsigned dtypes match x86-64 NumPy across Windows and Linux for all 17 edge values.
+    let cross_os_targets = [
         ("i8", DType::I8),
         ("i16", DType::I16),
         ("i32", DType::I32),
         ("i64", DType::I64),
         ("u8", DType::U8),
         ("u16", DType::U16),
-        ("u32", DType::U32),
-        ("u64", DType::U64),
     ];
+    for (src_name, dyn_src) in [
+        ("f64", DynArray::F64(f64_arr.clone())),
+        ("f32", DynArray::F32(f32_arr.clone())),
+    ] {
+        for (dt_name, dt) in cross_os_targets {
+            let tag = format!("{src_name}_{dt_name}");
+            let cast = dyn_src.astype(dt, Casting::Unsafe).unwrap();
+            assert_dyn_matches_oracle(&cast, oracle.arr(&tag), 0.0, 0.0, false, false, &tag);
+        }
+    }
+
+    // For u32/u64: cross-OS oracle parity on well-defined finite non-negative floats + deterministic sentinel/wrap on edge values.
+    // (C float->uint for negative / NaN / out-of-range is compiler-dependent UB between MSVC Windows and GCC Linux.)
+    let pos_u = DynArray::F64(NdArray::from_vec(vec![0.0, -0.0, 1.5, 128.0, 256.0, 2147483648.0, 4294967295.0]));
+    assert_dyn_matches_oracle(&pos_u.astype(DType::U32, Casting::Unsafe).unwrap(), oracle.arr("pos_u32"), 0.0, 0.0, false, false, "pos_u32");
+    assert_dyn_matches_oracle(&pos_u.astype(DType::U64, Casting::Unsafe).unwrap(), oracle.arr("pos_u64"), 0.0, 0.0, false, false, "pos_u64");
+
+    assert_eq!(
+        NdArray::<u32>::try_from(DynArray::F64(f64_arr.clone()).astype(DType::U32, Casting::Unsafe).unwrap())
+            .unwrap()
+            .to_vec(),
+        vec![0, 0, 1, u32::MAX, (-129i32) as u32, 128, 256, 2147483648, 2147483648, 0, 0, 0, 0, 0, 0, 0, 0]
+    );
+    assert_eq!(
+        NdArray::<u64>::try_from(DynArray::F64(f64_arr.clone()).astype(DType::U64, Casting::Unsafe).unwrap())
+            .unwrap()
+            .to_vec(),
+        vec![0, 0, 1, u64::MAX, (-129i64) as u64, 128, 256, (-2147483648i64) as u64, 2147483648, 1u64 << 63, 1u64 << 63, 1u64 << 63, 1u64 << 63, 1u64 << 63, 1u64 << 63, 1u64 << 63, 1u64 << 63]
+    );
+    #[cfg(target_os = "windows")]
     for (src_name, dyn_src) in [
         ("f64", DynArray::F64(f64_arr)),
         ("f32", DynArray::F32(f32_arr)),
     ] {
-        for (dt_name, dt) in targets {
+        for (dt_name, dt) in [("u32", DType::U32), ("u64", DType::U64)] {
             let tag = format!("{src_name}_{dt_name}");
             let cast = dyn_src.astype(dt, Casting::Unsafe).unwrap();
             assert_dyn_matches_oracle(&cast, oracle.arr(&tag), 0.0, 0.0, false, false, &tag);
